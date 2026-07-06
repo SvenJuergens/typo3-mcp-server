@@ -15,8 +15,19 @@ These tests help ensure that:
 
 ### Prerequisites
 
-1. Set the OpenRouter API key, which allows testing with multiple models
-   (Anthropic, OpenAI, Mistral, Moonshot, etc.) through a single key:
+1. Set an API key for one of the supported gateways. Both expose an
+   OpenAI-compatible API and let you reach many models with a single key.
+   When both are set, **Cortecs is preferred**.
+
+   **Cortecs** (https://cortecs.ai) — EU-native gateway with Zero Data
+   Retention. Requests are routed only to ZDR-compliant EU providers.
+
+   ```bash
+   export CORTECS_API_KEY="..."
+   ```
+
+   **OpenRouter** (https://openrouter.ai) — broadest model catalog, incl.
+   proprietary OpenAI GPT models.
 
    ```bash
    export OPENROUTER_API_KEY="sk-or-v1-..."
@@ -24,6 +35,8 @@ These tests help ensure that:
 
    Or create a `.env.local` file:
    ```bash
+   CORTECS_API_KEY="..."
+   # or
    OPENROUTER_API_KEY="sk-or-v1-..."
    ```
 
@@ -39,17 +52,30 @@ These tests help ensure that:
 
 ### Supported Models
 
-When using OpenRouter, the following models are available via `modelProvider()`:
+Tests using `#[DataProvider('modelProvider')]` run once per logical model key
+automatically. The key maps to a provider-specific model ID:
 
-| Key              | OpenRouter Model ID              |
-|------------------|----------------------------------|
-| `haiku`          | `anthropic/claude-3-5-haiku`     |
-| `gpt-5.2`       | `openai/gpt-5.2`                |
-| `gpt-oss`        | `openai/gpt-oss-120b`           |
-| `kimi-k2`        | `moonshotai/kimi-k2`            |
-| `mistral-medium` | `mistralai/mistral-medium-3`     |
+| Key                  | OpenRouter Model ID              | Cortecs Model ID       |
+|----------------------|----------------------------------|------------------------|
+| `haiku-4.5`          | `anthropic/claude-haiku-4.5`     | `claude-haiku-4-5`     |
+| `gpt-5.4-mini`       | `openai/gpt-5.4-mini`            | — *(not available)*    |
+| `gpt-oss-120b`       | `openai/gpt-oss-120b`            | `gpt-oss-120b`         |
+| `mistral-large-2512` | `mistralai/mistral-large-2512`   | `mistral-large-2512`   |
+| `gemini-3-flash`     | `google/gemini-3-flash-preview`  | `gemini-3.5-flash`     |
 
-Tests using `#[DataProvider('modelProvider')]` run once per model automatically.
+When running against Cortecs, keys without a Cortecs equivalent are skipped
+automatically (reported as skipped, not failed).
+
+**Why no proprietary GPT on Cortecs:** Cortecs' catalog does not include
+proprietary OpenAI models (`gpt-4`/`gpt-5`/o-series) — with or without ZDR. The
+only OpenAI models offered are the open-weight `gpt-oss-*` series, served by EU
+providers (Scaleway, Nebius, OVH, IONOS, …), not Azure. Proprietary Anthropic
+(Claude, via AWS Bedrock), Google (Gemini) and Mistral models *are* available.
+
+**Reasoning parameter caveat:** On Cortecs, Claude is served via AWS Bedrock,
+which rejects the OpenRouter-style `reasoning` object (HTTP 400). So the
+extended-thinking boost configured for Haiku on OpenRouter is not applied on
+Cortecs. The `gpt-oss` series does accept `reasoning.effort`.
 
 ### Cost Considerations
 
@@ -65,9 +91,9 @@ These tests make actual API calls and will incur costs:
 
 The tests use:
 - **Temperature**: 0 (for deterministic responses)
-- **Default Model**: `anthropic/claude-3-5-haiku` via OpenRouter
+- **Default Model**: Haiku 4.5 (`claude-haiku-4-5` on Cortecs / `anthropic/claude-haiku-4.5` on OpenRouter)
 - **Max Tokens**: 4000 per call
-- **Provider**: OpenRouter
+- **Provider**: Cortecs (preferred) or OpenRouter, selected by which API key is set
 
 ## Writing New Tests
 
@@ -173,24 +199,25 @@ use PHPUnit\Framework\Attributes\DataProvider;
 #[DataProvider('modelProvider')]
 public function testSomethingWithAllModels(string $modelKey): void
 {
+    // setModel() skips the test automatically if the model has no equivalent
+    // on the active provider (e.g. proprietary GPT keys when running on Cortecs).
     $this->setModel($modelKey);
-
-    if ($this->llmProvider !== 'openrouter' && $modelKey !== 'haiku') {
-        $this->markTestSkipped("Model requires OpenRouter");
-    }
 
     // Test logic here...
 }
 ```
 
-The `LlmTestCase` uses `OpenRouterClient` when `OPENROUTER_API_KEY` is set, supporting all models via the OpenAI-compatible API.
+`LlmTestCase` selects the client in `initializeLlmClient()`: `CortecsClient`
+when `CORTECS_API_KEY` is set, otherwise `OpenRouterClient` when
+`OPENROUTER_API_KEY` is set. Both talk the OpenAI-compatible API.
 
 ### Adding New Providers
 
 To add a new provider:
 1. Create a new client implementing `LlmClientInterface`
 2. Add initialization logic in `LlmTestCase::initializeLlmClient()`
-3. Add new model keys to the `MODELS` constant
+3. Add a provider-specific model map (see `MODELS` / `CORTECS_MODELS`) so the
+   shared `modelProvider()` keys resolve to that provider's model IDs
 
 ## Handling Test Failures
 

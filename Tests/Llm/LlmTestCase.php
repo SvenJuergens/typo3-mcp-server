@@ -6,6 +6,7 @@ namespace Hn\McpServer\Tests\Llm;
 
 use Hn\McpServer\MCP\Tool\ToolInterface;
 use Hn\McpServer\MCP\ToolRegistry;
+use Hn\McpServer\Tests\Llm\Client\CortecsClient;
 use Hn\McpServer\Tests\Llm\Client\LlmClientInterface;
 use Hn\McpServer\Tests\Llm\Client\LlmResponse;
 use Hn\McpServer\Tests\Llm\Client\OpenRouterClient;
@@ -47,6 +48,33 @@ abstract class LlmTestCase extends FunctionalTestCase
         // we get 0 failures, 1 retry, and ~10% lower avg test time. The extra
         // reasoning tokens are cheaper than the avoided retry round-trips.
         'haiku-4.5' => ['reasoning' => ['enabled' => true]],
+    ];
+
+    /**
+     * Cortecs (https://cortecs.ai) model IDs, keyed by the same logical labels
+     * as {@see MODELS} so tests are provider-agnostic. Cortecs is an EU-native
+     * gateway with Zero Data Retention; because ZDR excludes Azure (the only
+     * GPT backend) and Cortecs does not resell proprietary OpenAI models at all,
+     * the 'gpt-5.4-mini' key has no Cortecs equivalent and is intentionally
+     * absent — tests requesting it are skipped when running against Cortecs.
+     */
+    protected const CORTECS_MODELS = [
+        'haiku-4.5' => 'claude-haiku-4-5',
+        // 'gpt-5.4-mini' — no proprietary OpenAI models on Cortecs (ZDR/Azure).
+        'gpt-oss-120b' => 'gpt-oss-120b',
+        'mistral-large-2512' => 'mistral-large-2512',
+        // Cortecs has no gemini-3-flash; 3.5-flash is the closest current flash tier.
+        'gemini-3-flash' => 'gemini-3.5-flash',
+    ];
+
+    /**
+     * Per-model options for Cortecs. The OpenRouter-style `reasoning` object is
+     * NOT accepted by every backend: Claude is served via AWS Bedrock, which
+     * rejects an unknown `reasoning` key with HTTP 400, so haiku gets none here.
+     * The gpt-oss series (served by EU providers) does accept `reasoning.effort`.
+     */
+    protected const CORTECS_MODEL_OPTIONS = [
+        'gpt-oss-120b' => ['reasoning' => ['effort' => 'medium']],
     ];
 
     protected array $coreExtensionsToLoad = [
@@ -197,7 +225,7 @@ abstract class LlmTestCase extends FunctionalTestCase
      */
     private function logAttemptFailure(int $attempt, int $maxRetries, \Throwable $e, bool $retrying): void
     {
-        $modelKey = array_search($this->llmModel, static::MODELS, true);
+        $modelKey = array_search($this->llmModel, $this->activeModels(), true);
         $modelLabel = $modelKey !== false ? (string)$modelKey : $this->llmModel;
         $shortClass = preg_replace('/^.*\\\\/', '', static::class);
         $message = preg_replace('/\s+/', ' ', mb_substr($e->getMessage(), 0, 320));
@@ -224,9 +252,26 @@ abstract class LlmTestCase extends FunctionalTestCase
 
     /**
      * Initialize the LLM client based on available API keys.
+     *
+     * Cortecs is preferred when its key is present (EU-native gateway with Zero
+     * Data Retention); OpenRouter is the fallback. Set CORTECS_API_KEY for
+     * Cortecs or OPENROUTER_API_KEY for OpenRouter.
      */
     protected function initializeLlmClient(): void
     {
+        // Accept the common misspelling "CORTECTS_API_KEY" as well so a typo in
+        // the environment does not silently fall through to OpenRouter.
+        $cortecsKey = getenv('CORTECS_API_KEY') ?: getenv('CORTECTS_API_KEY');
+
+        if (!empty($cortecsKey)) {
+            $this->llmClient = new CortecsClient($cortecsKey);
+            $this->llmProvider = 'cortecs';
+            if (empty($this->llmModel)) {
+                $this->llmModel = self::CORTECS_MODELS['haiku-4.5'];
+            }
+            return;
+        }
+
         $openRouterKey = getenv('OPENROUTER_API_KEY');
 
         if (!empty($openRouterKey)) {
@@ -238,17 +283,44 @@ abstract class LlmTestCase extends FunctionalTestCase
             return;
         }
 
-        $this->markTestSkipped('No LLM API key configured. Set OPENROUTER_API_KEY.');
+        $this->markTestSkipped('No LLM API key configured. Set CORTECS_API_KEY or OPENROUTER_API_KEY.');
+    }
+
+    /**
+     * The model map for the active provider, keyed by logical label.
+     */
+    protected function activeModels(): array
+    {
+        return $this->llmProvider === 'cortecs' ? static::CORTECS_MODELS : static::MODELS;
     }
 
     /**
      * Set the model to use for subsequent LLM calls.
-     * Use model keys from MODELS constant or full model IDs.
+     * Use model keys from the active provider's map or full model IDs.
+     *
+     * When a logical key exists in the canonical MODELS set but has no
+     * equivalent on the active provider (e.g. proprietary GPT on Cortecs),
+     * the test is skipped rather than silently falling back to the raw key.
      */
     protected function setModel(string $model): void
     {
-        // Allow using short keys like 'haiku', 'gpt-5.2', etc.
-        $this->llmModel = self::MODELS[$model] ?? $model;
+        $models = $this->activeModels();
+
+        if (isset($models[$model])) {
+            $this->llmModel = $models[$model];
+            return;
+        }
+
+        if (isset(static::MODELS[$model])) {
+            $this->markTestSkipped(sprintf(
+                'Model "%s" is not available on provider "%s".',
+                $model,
+                $this->llmProvider
+            ));
+        }
+
+        // Not a known logical key — treat as a raw model ID.
+        $this->llmModel = $model;
     }
 
     /**
@@ -338,9 +410,12 @@ abstract class LlmTestCase extends FunctionalTestCase
 
     protected function getModelOptions(): array
     {
-        $modelKey = array_search($this->llmModel, static::MODELS, true);
-        if ($modelKey !== false && isset(static::MODEL_OPTIONS[$modelKey])) {
-            return static::MODEL_OPTIONS[$modelKey];
+        $models = $this->activeModels();
+        $options = $this->llmProvider === 'cortecs' ? static::CORTECS_MODEL_OPTIONS : static::MODEL_OPTIONS;
+
+        $modelKey = array_search($this->llmModel, $models, true);
+        if ($modelKey !== false && isset($options[$modelKey])) {
+            return $options[$modelKey];
         }
         return [];
     }
