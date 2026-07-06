@@ -48,3 +48,23 @@ CREATE TABLE tx_mcpserver_access_tokens (
 	KEY be_user_uid (be_user_uid),
 	KEY expires (expires)
 );
+#
+# Pre-signed single-use upload tokens (UploadFile MCP tool)
+#
+CREATE TABLE tx_mcpserver_upload_tokens (
+	uid int(11) NOT NULL auto_increment,
+	pid int(11) DEFAULT '0' NOT NULL,
+	tstamp int(11) unsigned DEFAULT '0' NOT NULL,
+	crdate int(11) unsigned DEFAULT '0' NOT NULL,
+
+	token varchar(64) DEFAULT '' NOT NULL,
+	be_user_uid int(11) unsigned DEFAULT '0' NOT NULL,
+	target_folder varchar(255) DEFAULT '' NOT NULL,
+	file_name varchar(255) DEFAULT '' NOT NULL,
+	expires int(11) unsigned DEFAULT '0' NOT NULL,
+	used int(11) unsigned DEFAULT '0' NOT NULL,
+
+	PRIMARY KEY (uid),
+	KEY token (token),
+	KEY expires (expires)
+);

@@ -142,12 +142,38 @@ class UploadFileToolTest extends FunctionalTestCase
         $this->assertUploadError(['content' => 'hello'], 'fileName');
     }
 
-    public function testRequiresExactlyOneSource(): void
+    public function testUrlAndContentTogetherAreRejected(): void
     {
-        $this->assertUploadError([], 'exactly one');
         $this->assertUploadError(
             ['url' => 'http://203.0.113.10/a.jpg', 'content' => 'x'],
-            'exactly one'
+            'only one'
+        );
+    }
+
+    public function testNoSourceReturnsPresignedUploadUrl(): void
+    {
+        $data = $this->executeUpload(['targetFolder' => '/user_upload/']);
+
+        $this->assertArrayHasKey('uploadUrl', $data);
+        $this->assertStringContainsString('/mcp_upload?token=', $data['uploadUrl']);
+        $this->assertEquals('1:/user_upload/', $data['targetFolder']);
+        $this->assertArrayHasKey('validUntil', $data);
+        $this->assertStringContainsString('curl', $data['instructions']);
+
+        // A hashed single-use token was persisted
+        $count = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('tx_mcpserver_upload_tokens')
+            ->count('uid', 'tx_mcpserver_upload_tokens', ['used' => 0]);
+        $this->assertEquals(1, $count);
+    }
+
+    public function testSchemaOffersDefaultTargetFolder(): void
+    {
+        $schema = GeneralUtility::makeInstance(UploadFileTool::class)->getSchema();
+        $this->assertEquals(
+            '1:/user_upload/',
+            $schema['inputSchema']['properties']['targetFolder']['default'] ?? null,
+            'The schema should advertise the default upload folder'
         );
     }
 
@@ -264,6 +290,23 @@ class UploadFileToolTest extends FunctionalTestCase
         ]);
 
         $this->assertStringEndsWith('.png', $data['fileName']);
+    }
+
+    public function testUrlUploadPrefersContentDispositionFileName(): void
+    {
+        $this->mockHttpResponses([
+            'http://203.0.113.10/download?id=7' => new Response(200, [
+                'Content-Type' => 'image/png',
+                'Content-Disposition' => 'attachment; filename="pretty-name.png"',
+            ], $this->pngBytes()),
+        ]);
+
+        $data = $this->executeUpload([
+            'url' => 'http://203.0.113.10/download?id=7',
+            'targetFolder' => '/user_upload/',
+        ]);
+
+        $this->assertEquals('pretty-name.png', $data['fileName']);
     }
 
     public function testUrlUploadFailsOnHttpError(): void
