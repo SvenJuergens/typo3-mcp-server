@@ -52,25 +52,35 @@ These tests help ensure that:
 
 ### Supported Models
 
-Tests using `#[DataProvider('modelProvider')]` run once per logical model key
-automatically. The key maps to a provider-specific model ID:
+Tests using `#[DataProvider('modelProvider')]` run once per model. The set of
+models depends on the active provider — `modelProvider()` advertises only the
+models that provider can actually serve, so the two lists differ:
 
-| Key                  | OpenRouter Model ID              | Cortecs Model ID       |
-|----------------------|----------------------------------|------------------------|
-| `haiku-4.5`          | `anthropic/claude-haiku-4.5`     | `claude-haiku-4-5`     |
-| `gpt-5.4-mini`       | `openai/gpt-5.4-mini`            | — *(not available)*    |
-| `gpt-oss-120b`       | `openai/gpt-oss-120b`            | `gpt-oss-120b`         |
-| `mistral-large-2512` | `mistralai/mistral-large-2512`   | `mistral-large-2512`   |
-| `gemini-3-flash`     | `google/gemini-3-flash-preview`  | `gemini-3.5-flash`     |
+**Cortecs** (open-source-leaning, EU-native):
 
-When running against Cortecs, keys without a Cortecs equivalent are skipped
-automatically (reported as skipped, not failed).
+| Key                  | Cortecs Model ID    |
+|----------------------|---------------------|
+| `haiku-4.5`          | `claude-haiku-4-5`  |
+| `gpt-oss-120b`       | `gpt-oss-120b`      |
+| `minimax-m3`         | `minimax-m3`        |
+| `mistral-large-2512` | `mistral-large-2512`|
+| `gemini-3-flash`     | `gemini-3.5-flash`  |
 
-**Why no proprietary GPT on Cortecs:** Cortecs' catalog does not include
-proprietary OpenAI models (`gpt-4`/`gpt-5`/o-series) — with or without ZDR. The
-only OpenAI models offered are the open-weight `gpt-oss-*` series, served by EU
-providers (Scaleway, Nebius, OVH, IONOS, …), not Azure. Proprietary Anthropic
-(Claude, via AWS Bedrock), Google (Gemini) and Mistral models *are* available.
+**OpenRouter** (fallback):
+
+| Key                  | OpenRouter Model ID             |
+|----------------------|---------------------------------|
+| `haiku-4.5`          | `anthropic/claude-haiku-4.5`    |
+| `gpt-oss-120b`       | `openai/gpt-oss-120b`           |
+| `mistral-large-2512` | `mistralai/mistral-large-2512`  |
+| `gemini-3-flash`     | `google/gemini-3-flash-preview` |
+
+**No proprietary GPT:** Cortecs' catalog contains no proprietary OpenAI models
+(`gpt-4`/`gpt-5`/o-series) — with or without ZDR. The only OpenAI models it
+offers are the open-weight `gpt-oss-*` series, served by EU providers
+(Scaleway, Nebius, OVH, IONOS, …), not Azure. Proprietary GPT is therefore not
+part of the test matrix. Proprietary Anthropic (Claude, via AWS Bedrock),
+Google (Gemini) and Mistral models *are* available.
 
 **Reasoning parameter caveat:** On Cortecs, Claude is served via AWS Bedrock,
 which rejects the OpenRouter-style `reasoning` object (HTTP 400). So the

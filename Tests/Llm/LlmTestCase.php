@@ -30,18 +30,12 @@ abstract class LlmTestCase extends FunctionalTestCase
      */
     protected const MODELS = [
         'haiku-4.5' => 'anthropic/claude-haiku-4.5',
-        'gpt-5.4-mini' => 'openai/gpt-5.4-mini',
         'gpt-oss-120b' => 'openai/gpt-oss-120b',
         'mistral-large-2512' => 'mistralai/mistral-large-2512',
         'gemini-3-flash' => 'google/gemini-3-flash-preview',
     ];
 
     protected const MODEL_OPTIONS = [
-        // 'medium' instead of 'high': gpt-5.4-mini and haiku-4.5 dominate the
-        // OpenRouter spend (~$5 + ~$4 per full suite run). 'high' was added in
-        // PR #59 for reliability; 'medium' keeps tool-use coherent without the
-        // extra reasoning-token tax. Re-tighten if majority-pass starts failing.
-        'gpt-5.4-mini' => ['reasoning' => ['effort' => 'medium']],
         // Claude Haiku 4.5 extended thinking explicitly enabled. Empirically
         // measured (haiku-only filter, 32 tests): with reasoning OFF we get
         // 3 hard failures retried 3× each (~9 retry rounds), with reasoning ON
@@ -51,17 +45,17 @@ abstract class LlmTestCase extends FunctionalTestCase
     ];
 
     /**
-     * Cortecs (https://cortecs.ai) model IDs, keyed by the same logical labels
-     * as {@see MODELS} so tests are provider-agnostic. Cortecs is an EU-native
-     * gateway with Zero Data Retention; because ZDR excludes Azure (the only
-     * GPT backend) and Cortecs does not resell proprietary OpenAI models at all,
-     * the 'gpt-5.4-mini' key has no Cortecs equivalent and is intentionally
-     * absent — tests requesting it are skipped when running against Cortecs.
+     * Cortecs (https://cortecs.ai) model IDs. Cortecs is an EU-native gateway
+     * with Zero Data Retention; its catalog contains no proprietary OpenAI
+     * models (only the open-weight gpt-oss series), so this set is
+     * deliberately open-source-leaning. The logical keys differ from
+     * {@see MODELS} — {@see modelProvider()} picks the map for the active
+     * provider, so each provider only advertises models it can actually serve.
      */
     protected const CORTECS_MODELS = [
         'haiku-4.5' => 'claude-haiku-4-5',
-        // 'gpt-5.4-mini' — no proprietary OpenAI models on Cortecs (ZDR/Azure).
         'gpt-oss-120b' => 'gpt-oss-120b',
+        'minimax-m3' => 'minimax-m3',
         'mistral-large-2512' => 'mistral-large-2512',
         // Cortecs has no gemini-3-flash; 3.5-flash is the closest current flash tier.
         'gemini-3-flash' => 'gemini-3.5-flash',
@@ -259,9 +253,7 @@ abstract class LlmTestCase extends FunctionalTestCase
      */
     protected function initializeLlmClient(): void
     {
-        // Accept the common misspelling "CORTECTS_API_KEY" as well so a typo in
-        // the environment does not silently fall through to OpenRouter.
-        $cortecsKey = getenv('CORTECS_API_KEY') ?: getenv('CORTECTS_API_KEY');
+        $cortecsKey = getenv('CORTECS_API_KEY');
 
         if (!empty($cortecsKey)) {
             $this->llmClient = new CortecsClient($cortecsKey);
@@ -325,13 +317,19 @@ abstract class LlmTestCase extends FunctionalTestCase
 
     /**
      * Data provider for multi-model tests.
-     * Returns all configured models to test against.
+     *
+     * Runs once per model of the active provider. The provider is chosen the
+     * same way as {@see initializeLlmClient()} — by which API key is set — but
+     * resolved here statically because data providers execute before setUp().
      */
     public static function modelProvider(): array
     {
+        $models = !empty(getenv('CORTECS_API_KEY')) ? static::CORTECS_MODELS : static::MODELS;
+        $keys = array_keys($models);
+
         return array_map(
             fn(string $key) => [$key],
-            array_combine(array_keys(static::MODELS), array_keys(static::MODELS))
+            array_combine($keys, $keys)
         );
     }
 
