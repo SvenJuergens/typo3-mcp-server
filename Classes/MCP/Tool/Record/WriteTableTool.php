@@ -553,7 +553,7 @@ class WriteTableTool extends AbstractRecordTool
     /**
      * Update an existing record
      */
-    protected function updateRecord(string $table, int $uid, array $data, ?string $position = null): CallToolResult
+    protected function updateRecord(string $table, int $uid, array $data, ?string $position = null, bool $dispatchEvent = true): CallToolResult
     {
         // Validate the data
         $validationResult = $this->validateRecordData($table, $data, 'update', $uid);
@@ -672,8 +672,12 @@ class WriteTableTool extends AbstractRecordTool
             }
         }
 
-        $eventDispatcher = GeneralUtility::makeInstance(EventDispatcherInterface::class);
-        $eventDispatcher->dispatch(new AfterRecordWriteEvent($table, 'update', $uid, $data, null));
+        // Suppressed when called as the inner step of translateRecord(), which
+        // dispatches a single 'translate' event for the whole operation instead.
+        if ($dispatchEvent) {
+            $eventDispatcher = GeneralUtility::makeInstance(EventDispatcherInterface::class);
+            $eventDispatcher->dispatch(new AfterRecordWriteEvent($table, 'update', $uid, $data, null));
+        }
 
         // Return the result with the original live UID
         return $this->createJsonResult([
@@ -984,7 +988,6 @@ class WriteTableTool extends AbstractRecordTool
         // step the provided translations would be silently dropped and a second
         // update call would be needed.
         $fieldValues = $data;
-        $languageField = $GLOBALS['TCA'][$table]['ctrl']['languageField'] ?? '';
         unset(
             $fieldValues['sys_language_uid'],
             $fieldValues[$languageField],
@@ -993,7 +996,7 @@ class WriteTableTool extends AbstractRecordTool
             $fieldValues['uid']
         );
         if ($newTranslationUid && !empty($fieldValues)) {
-            $updateResult = $this->updateRecord($table, (int)$newTranslationUid, $fieldValues);
+            $updateResult = $this->updateRecord($table, (int)$newTranslationUid, $fieldValues, null, false);
             if ($updateResult->isError) {
                 return $this->createErrorResult(
                     'Translation record was created (uid ' . $newTranslationUid . '), but applying the translated '
