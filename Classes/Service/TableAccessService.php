@@ -1366,7 +1366,15 @@ class TableAccessService implements SingletonInterface
 
         // Validate select fields (all sources: static, foreign_table, itemsProcFunc, TSconfig)
         if ($fieldType === 'select') {
-            $allowedValues = $this->getSelectFieldAllowedValues($table, $fieldName, $record);
+            // An empty value means "leave unset / use the field default" (e.g.
+            // an inherited backend_layout). TCA models that default as an item
+            // with an empty value, but parseSelectItems() drops empty-valued
+            // items from the advertised enum — so an explicit '' or null would
+            // otherwise fail the membership check below even though it is valid.
+            // Treat empty as "not set" here; the required-field check further
+            // down still rejects empty values for fields that mandate one.
+            $isEmpty = $value === null || $value === '' || (is_array($value) && empty($value));
+            $allowedValues = $isEmpty ? null : $this->getSelectFieldAllowedValues($table, $fieldName, $record);
             if ($allowedValues !== null) {
                 // Handle multiple values: arrays (multi-select), comma-separated strings, or single values
                 if (is_array($value)) {

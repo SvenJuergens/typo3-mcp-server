@@ -99,6 +99,62 @@ class ValidationRefactoringTest extends FunctionalTestCase
         $this->assertStringContainsString('must be one of', $result);
     }
 
+    /**
+     * Regression: an empty select value means "leave unset / use the field
+     * default" (e.g. an inherited backend_layout). TCA models that default as
+     * an item with an empty value, but the advertised enum never contains the
+     * empty option, so an explicit '' or null must not be validated against it.
+     * This previously made LLMs fail to create a page whenever they filled in
+     * an empty backend_layout.
+     */
+    public function testEmptySelectValueIsAllowed(): void
+    {
+        $this->assertNull(
+            $this->tableAccessService->validateFieldValue('pages', 'backend_layout', ''),
+            'Empty backend_layout should be accepted (means "use default")'
+        );
+        $this->assertNull(
+            $this->tableAccessService->validateFieldValue('pages', 'backend_layout', null),
+            'Null backend_layout should be accepted (means "use default")'
+        );
+    }
+
+    /**
+     * The empty-value exemption must not weaken validation of real values:
+     * a non-empty value that is not a registered option is still rejected.
+     */
+    public function testInvalidNonEmptySelectValueStillRejected(): void
+    {
+        $result = $this->tableAccessService->validateFieldValue(
+            'pages',
+            'backend_layout',
+            'definitely-not-a-registered-layout'
+        );
+        $this->assertNotNull($result);
+        $this->assertStringContainsString('must be one of', $result);
+    }
+
+    /**
+     * End-to-end reproduction of the original failure: creating a page while
+     * passing an empty backend_layout must succeed, not error out.
+     */
+    public function testWriteToolAcceptsEmptyBackendLayout(): void
+    {
+        $params = [
+            'action' => 'create',
+            'table' => 'pages',
+            'pid' => 1,
+            'data' => [
+                'title' => 'Page With Empty Layout',
+                'doktype' => 1,
+                'backend_layout' => '',
+            ],
+        ];
+
+        $result = $this->writeTool->execute($params);
+        $this->assertFalse($result->isError, json_encode($result->jsonSerialize()));
+    }
+
     public function testStringLengthValidation(): void
     {
         // header field has a max length of 255
