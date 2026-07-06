@@ -121,6 +121,7 @@ The MCP Server provides these tools for interacting with TYPO3:
 
 ### Content Modification
 - **WriteTable** - Create, update, or delete records (safely in workspace)
+- **UploadFile** - Add new files to the file storage from a URL (including YouTube/Vimeo) or from raw text content; never overwrites or deletes existing files
 
 > Each tool provides detailed schema information when called. See the Real-World Scenarios below for practical examples.
 
@@ -253,7 +254,7 @@ Relations are transparently resolved and can be set using simple syntax:
 - **Select relations**: Use comma-separated IDs or arrays
 - **Inline relations**: Provide as nested objects
 - **MM relations**: Handled automatically
-- **File references**: Currently read-only
+- **File references**: Created and updated as embedded inline records (reference existing `sys_file` UIDs via `uid_local`)
 - **Bidirectional**: Updates both sides as needed
 
 ### Language Support
@@ -315,9 +316,9 @@ The MCP Server respects all TYPO3 permissions:
 While the MCP Server is powerful, some features are still in development:
 
 ### Image/File Handling
-- Currently read-only access to file references
-- Cannot upload new files or modify existing ones
-- Workaround: Reference existing files by ID
+- Files are create-only: `UploadFile` adds new files (from URL, YouTube/Vimeo URL, or text content), but existing files can never be overwritten or deleted through MCP. Physical files are not workspace-versioned in TYPO3, so any destructive file operation would be immediately live and irreversible — name conflicts are auto-renamed and identical content is deduplicated instead.
+- File metadata (`sys_file_metadata`) remains editable through WriteTable (workspace-staged).
+- No visual/semantic image search yet — finding images relies on file names and metadata.
 
 ### Direct Workspace Management
 - Cannot create/delete workspaces
