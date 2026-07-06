@@ -297,7 +297,7 @@ class WriteTableTool extends AbstractRecordTool
             case 'translate':
                 // The language UID has already been converted from ISO code if needed
                 $targetLanguageUid = (int)$data['sys_language_uid'];
-                return $this->translateRecord($table, $uid, $targetLanguageUid);
+                return $this->translateRecord($table, $uid, $targetLanguageUid, $data);
                 
             default:
                 // This should never happen due to earlier validation
@@ -886,7 +886,7 @@ class WriteTableTool extends AbstractRecordTool
     /**
      * Translate a record to another language
      */
-    protected function translateRecord(string $table, int $uid, int $targetLanguageUid): CallToolResult
+    protected function translateRecord(string $table, int $uid, int $targetLanguageUid, array $data = []): CallToolResult
     {
         // Check if table supports translations
         $languageField = $this->tableAccessService->getLanguageFieldName($table);
@@ -978,9 +978,34 @@ class WriteTableTool extends AbstractRecordTool
 
         $targetIsoCode = $this->languageService->getIsoCodeFromUid($targetLanguageUid) ?? $targetLanguageUid;
 
+        // Apply the translated field values that came with the call (the schema
+        // documents `data` as required for translate). DataHandler's localize
+        // only produces "[Translate to ...]" placeholder copies - without this
+        // step the provided translations would be silently dropped and a second
+        // update call would be needed.
+        $fieldValues = $data;
+        $languageField = $GLOBALS['TCA'][$table]['ctrl']['languageField'] ?? '';
+        unset(
+            $fieldValues['sys_language_uid'],
+            $fieldValues[$languageField],
+            $fieldValues[$translationParentField],
+            $fieldValues['pid'],
+            $fieldValues['uid']
+        );
+        if ($newTranslationUid && !empty($fieldValues)) {
+            $updateResult = $this->updateRecord($table, (int)$newTranslationUid, $fieldValues);
+            if ($updateResult->isError) {
+                return $this->createErrorResult(
+                    'Translation record was created (uid ' . $newTranslationUid . '), but applying the translated '
+                    . 'field values failed: ' . ($updateResult->content[0]->text ?? 'unknown error')
+                    . ' Use action "update" on the translation record to set the fields.'
+                );
+            }
+        }
+
         if ($newTranslationUid) {
             $eventDispatcher = GeneralUtility::makeInstance(EventDispatcherInterface::class);
-            $eventDispatcher->dispatch(new AfterRecordWriteEvent($table, 'translate', (int)$newTranslationUid, [], null));
+            $eventDispatcher->dispatch(new AfterRecordWriteEvent($table, 'translate', (int)$newTranslationUid, $fieldValues, null));
         }
 
         return $this->createJsonResult([
