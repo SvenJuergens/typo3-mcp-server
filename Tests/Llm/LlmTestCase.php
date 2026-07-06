@@ -31,6 +31,7 @@ abstract class LlmTestCase extends FunctionalTestCase
     protected const MODELS = [
         'haiku-4.5' => 'anthropic/claude-haiku-4.5',
         'gpt-oss-120b' => 'openai/gpt-oss-120b',
+        'minimax-m3' => 'minimax/minimax-m3',
         'mistral-large-2512' => 'mistralai/mistral-large-2512',
         'gemini-3-flash' => 'google/gemini-3-flash-preview',
     ];
@@ -45,12 +46,12 @@ abstract class LlmTestCase extends FunctionalTestCase
     ];
 
     /**
-     * Cortecs (https://cortecs.ai) model IDs. Cortecs is an EU-native gateway
-     * with Zero Data Retention; its catalog contains no proprietary OpenAI
-     * models (only the open-weight gpt-oss series), so this set is
-     * deliberately open-source-leaning. The logical keys differ from
-     * {@see MODELS} — {@see modelProvider()} picks the map for the active
-     * provider, so each provider only advertises models it can actually serve.
+     * Cortecs (https://cortecs.ai) model IDs, keyed by the same logical labels
+     * as {@see MODELS}. Cortecs is an EU-native gateway with Zero Data
+     * Retention; its catalog contains no proprietary OpenAI models (only the
+     * open-weight gpt-oss series). {@see modelProvider()} picks the map for the
+     * active provider, so should the two sets ever diverge each provider only
+     * advertises models it can actually serve.
      */
     protected const CORTECS_MODELS = [
         'haiku-4.5' => 'claude-haiku-4-5',

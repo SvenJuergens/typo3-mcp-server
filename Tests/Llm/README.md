@@ -52,28 +52,18 @@ These tests help ensure that:
 
 ### Supported Models
 
-Tests using `#[DataProvider('modelProvider')]` run once per model. The set of
-models depends on the active provider — `modelProvider()` advertises only the
-models that provider can actually serve, so the two lists differ:
+Tests using `#[DataProvider('modelProvider')]` run once per model. Both
+providers expose the same logical keys, mapped to provider-specific model IDs.
+`modelProvider()` picks the map for the active provider, so if the sets ever
+diverge each provider only advertises models it can actually serve.
 
-**Cortecs** (open-source-leaning, EU-native):
-
-| Key                  | Cortecs Model ID    |
-|----------------------|---------------------|
-| `haiku-4.5`          | `claude-haiku-4-5`  |
-| `gpt-oss-120b`       | `gpt-oss-120b`      |
-| `minimax-m3`         | `minimax-m3`        |
-| `mistral-large-2512` | `mistral-large-2512`|
-| `gemini-3-flash`     | `gemini-3.5-flash`  |
-
-**OpenRouter** (fallback):
-
-| Key                  | OpenRouter Model ID             |
-|----------------------|---------------------------------|
-| `haiku-4.5`          | `anthropic/claude-haiku-4.5`    |
-| `gpt-oss-120b`       | `openai/gpt-oss-120b`           |
-| `mistral-large-2512` | `mistralai/mistral-large-2512`  |
-| `gemini-3-flash`     | `google/gemini-3-flash-preview` |
+| Key                  | Cortecs Model ID     | OpenRouter Model ID             |
+|----------------------|----------------------|---------------------------------|
+| `haiku-4.5`          | `claude-haiku-4-5`   | `anthropic/claude-haiku-4.5`    |
+| `gpt-oss-120b`       | `gpt-oss-120b`       | `openai/gpt-oss-120b`           |
+| `minimax-m3`         | `minimax-m3`         | `minimax/minimax-m3`            |
+| `mistral-large-2512` | `mistral-large-2512` | `mistralai/mistral-large-2512`  |
+| `gemini-3-flash`     | `gemini-3.5-flash`   | `google/gemini-3-flash-preview` |
 
 **No proprietary GPT:** Cortecs' catalog contains no proprietary OpenAI models
 (`gpt-4`/`gpt-5`/o-series) — with or without ZDR. The only OpenAI models it
