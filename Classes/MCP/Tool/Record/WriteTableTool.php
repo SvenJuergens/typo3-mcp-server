@@ -79,6 +79,8 @@ class WriteTableTool extends AbstractRecordTool
                             'on "update" setting "pid" moves the record to that page (combine with "position" to control where on the new page it lands; e.g. data: {"pid": 1} moves the record to page 1). ' .
                             ($hasMultipleLanguages ? 'Language fields (sys_language_uid) accept ISO codes like "de", "fr" instead of numeric IDs. ' : '') .
                             'Inline relations can be specified as arrays - UIDs for independent tables, record data for embedded tables. ' .
+                            'A file reference is an embedded record keyed by "uid_local" (the sys_file uid), so attaching an image looks like ' .
+                            '"assets": [{"uid_local": 3}] — always a list of record objects, never a single object or a wrapper like {"item": ...}. ' .
                             'For embedded tables (e.g. file references), the array fully replaces the existing list: ' .
                             'children present in the previous record but missing from the new array are deleted. ' .
                             'To keep an existing child include it as {"uid": <existing>, ...}; only the fields you set are patched. ' .
@@ -90,6 +92,7 @@ class WriteTableTool extends AbstractRecordTool
                         'examples' => [
                             ['pid' => 42, 'title' => 'News Title', 'bodytext' => 'News <b>content</b>', 'datetime' => '2024-01-01 10:00:00'],
                             ['pid' => 1, 'header' => 'Content Element Header', 'bodytext' => 'Content <b>text</b>', 'CType' => 'text'],
+                            ['pid' => 1, 'CType' => 'textmedia', 'header' => 'Our Team Lead', 'assets' => [['uid_local' => 3]]],
                             ['pid' => 5],
                             ['sys_language_uid' => 'de', 'title' => 'German translation'],
                             ['header' => [['search' => 'Welcom', 'replace' => 'Welcome'], ['search' => 'Compnay', 'replace' => 'Company']]],
@@ -1212,7 +1215,7 @@ class WriteTableTool extends AbstractRecordTool
             if ($fieldConfig && ($fieldType === 'inline' || $fieldType === 'file')) {
                 $inlineRelations[$fieldName] = [
                     'config' => $fieldConfig['config'],
-                    'value' => $value
+                    'value' => $this->normalizeInlineRelationValue($value)
                 ];
                 // Remove from data array as we'll process it separately
                 unset($data[$fieldName]);
@@ -1532,13 +1535,48 @@ class WriteTableTool extends AbstractRecordTool
     /**
      * Validate inline relation data
      */
+    /**
+     * Coerce near-miss inline/file relation shapes into the canonical list form.
+     *
+     * The relation value must be a list — UIDs for independent tables, record
+     * objects for embedded tables. Weaker LLMs frequently emit near-misses that
+     * clearly mean the same thing, and rejecting them just burns retries:
+     *  - a single record object, e.g. {"uid_local": 3}  → [{"uid_local": 3}]
+     *  - a wrapper map of records, e.g. {"item": {"uid_local": 3}}
+     *    (or {"0": {...}, "1": {...}}) → [{"uid_local": 3}]
+     *
+     * Heuristic: an already-list value is untouched; an associative array whose
+     * values are ALL arrays is treated as a wrapper (take its values), otherwise
+     * it is treated as a single record and wrapped. This mirrors the tolerance we
+     * apply elsewhere (e.g. empty select values) — the point of these tools is to
+     * be intuitive for LLMs, not to punish reasonable phrasing.
+     */
+    protected function normalizeInlineRelationValue($value)
+    {
+        if (!is_array($value) || $value === [] || array_is_list($value)) {
+            return $value;
+        }
+
+        foreach ($value as $item) {
+            if (!is_array($item)) {
+                // At least one scalar field → this is a single record object.
+                return [$value];
+            }
+        }
+
+        // Every value is itself an array → treat as a wrapper of records.
+        return array_values($value);
+    }
+
     protected function validateInlineRelationData(array $fieldConfig, $value): ?string
     {
+        $value = $this->normalizeInlineRelationValue($value);
+
         // Check if value is an array
         if (!is_array($value)) {
             return 'Inline relation field must be an array of UIDs or record data';
         }
-        
+
         // Get foreign table
         $foreignTable = $fieldConfig['config']['foreign_table'] ?? '';
         if (empty($foreignTable)) {

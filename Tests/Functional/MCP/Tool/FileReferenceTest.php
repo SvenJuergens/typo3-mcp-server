@@ -153,6 +153,79 @@ class FileReferenceTest extends FunctionalTestCase
     }
 
     /**
+     * Weaker LLMs often emit a file reference as a single record object instead
+     * of a one-element list. The tool should normalize that shape and still
+     * create the reference. See WriteTableTool::normalizeInlineRelationValue().
+     */
+    public function testCreateContentElementWithSingleObjectFileReference(): void
+    {
+        $writeTool = GeneralUtility::makeInstance(WriteTableTool::class);
+
+        $result = $writeTool->execute([
+            'table' => 'tt_content',
+            'action' => 'create',
+            'pid' => 1,
+            'data' => [
+                'header' => 'Single object assets',
+                'CType' => 'textmedia',
+                // Not wrapped in a list — a bare record object.
+                'assets' => ['uid_local' => 1, 'title' => 'Single Object Image'],
+            ],
+        ]);
+        $this->assertFalse($result->isError, json_encode($result->jsonSerialize()));
+
+        $contentUid = json_decode($result->content[0]->text, true)['uid'];
+
+        $readTool = GeneralUtility::makeInstance(ReadTableTool::class);
+        $data = json_decode($readTool->execute([
+            'table' => 'tt_content',
+            'uid' => $contentUid,
+        ])->content[0]->text, true);
+        $record = $data['records'][0];
+
+        $this->assertArrayHasKey('assets', $record);
+        $this->assertCount(1, $record['assets']);
+        $this->assertEquals(1, $record['assets'][0]['uid_local']);
+        $this->assertEquals('Single Object Image', $record['assets'][0]['title']);
+    }
+
+    /**
+     * Another common near-miss: the record wrapped in a map (e.g. {"item": {...}})
+     * rather than a list. The tool should unwrap it and create the reference.
+     */
+    public function testCreateContentElementWithWrappedFileReference(): void
+    {
+        $writeTool = GeneralUtility::makeInstance(WriteTableTool::class);
+
+        $result = $writeTool->execute([
+            'table' => 'tt_content',
+            'action' => 'create',
+            'pid' => 1,
+            'data' => [
+                'header' => 'Wrapped assets',
+                'CType' => 'textmedia',
+                // Wrapper map around the record, as seen from some models.
+                'assets' => ['item' => ['uid_local' => 1, 'title' => 'Wrapped Image']],
+            ],
+        ]);
+        $this->assertFalse($result->isError, json_encode($result->jsonSerialize()));
+
+        $contentUid = json_decode($result->content[0]->text, true)['uid'];
+
+        $readTool = GeneralUtility::makeInstance(ReadTableTool::class);
+        $data = json_decode($readTool->execute([
+            'table' => 'tt_content',
+            'uid' => $contentUid,
+        ])->content[0]->text, true);
+        $record = $data['records'][0];
+
+        $this->assertArrayHasKey('assets', $record);
+        $this->assertCount(1, $record['assets']);
+        $this->assertEquals(1, $record['assets'][0]['uid_local']);
+        $this->assertEquals('Wrapped Image', $record['assets'][0]['title']);
+    }
+
+    /**
      * Test that file references work correctly in workspaces (live UIDs exposed)
      */
     public function testFileReferencesInWorkspace(): void
