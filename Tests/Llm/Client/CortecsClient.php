@@ -174,6 +174,14 @@ class CortecsClient implements LlmClientInterface
                             'Content-Type' => 'application/json',
                         ],
                         'body' => json_encode($requestBody),
+                        // Without an explicit timeout, RequestFactory falls back
+                        // to TYPO3_CONF_VARS[HTTP][timeout] which defaults to 0
+                        // (no limit), so a stalled endpoint would hang the test
+                        // run forever. A read timeout of 120s is generous enough
+                        // for slow reasoning responses; a timeout is caught as a
+                        // ConnectException below and retried with backoff.
+                        'timeout' => 120,
+                        'connect_timeout' => 10,
                     ]
                 );
 

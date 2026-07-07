@@ -157,6 +157,12 @@ class OpenRouterClient implements LlmClientInterface
                             'X-Title' => 'TYPO3 MCP Server LLM Tests',
                         ],
                         'body' => json_encode($requestBody),
+                        // Explicit timeout so a stalled endpoint retries with
+                        // backoff instead of hanging the run forever (the
+                        // RequestFactory default is 0 = no limit). 120s read is
+                        // generous for slow reasoning responses.
+                        'timeout' => 120,
+                        'connect_timeout' => 10,
                     ]
                 );
 
