@@ -143,11 +143,13 @@ class McpEndpoint
             $stream->write($output);
             $stream->rewind();
 
-            return new Response(
+            $response = new Response(
                 $stream,
                 $statusCode,
                 ['Content-Type' => $contentType]
             );
+
+            return $this->addCorsHeaders($response, $request);
 
         } catch (\Throwable $e) {
             $stream = new Stream('php://temp', 'rw');
@@ -157,11 +159,13 @@ class McpEndpoint
             ]));
             $stream->rewind();
 
-            return new Response(
+            $response = new Response(
                 $stream,
                 500,
                 ['Content-Type' => 'application/json']
             );
+
+            return $this->addCorsHeaders($response, $request);
         }
     }
 
