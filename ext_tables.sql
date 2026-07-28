@@ -72,5 +72,5 @@ CREATE TABLE tx_mcpserver_oauth_clients (
 
 	PRIMARY KEY (uid),
 	KEY parent (pid),
-	KEY client_id (client_id)
+	UNIQUE KEY client_id (client_id)
 );

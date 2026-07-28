@@ -160,6 +160,7 @@ class OAuthService
             $boundClient = $this->getClient((string)$authCode['client_id']);
             if ($boundClient !== null) {
                 $clientUid = (int)$boundClient['uid'];
+                $this->touchClient($clientUid);
             }
         }
 
@@ -377,6 +378,94 @@ class OAuthService
             ['deleted' => 1, 'tstamp' => $currentTime],
             ['expires' => $tokenConnection->createQueryBuilder()->expr()->lt('expires', $currentTime)]
         );
+
+        $this->cleanupStaleClients($currentTime);
+    }
+
+    /**
+     * Soft-delete stale dynamically registered clients.
+     *
+     * Some MCP clients (notably claude.ai) register a NEW client on every fresh
+     * connection, so tx_mcpserver_oauth_clients grows unboundedly without cleanup.
+     * A client is stale when it has seen no activity for a full token lifetime
+     * AND holds no live token — deleting a client cascade-revokes its tokens
+     * (see {@see self::validateToken()}), so active clients must be kept.
+     * The well-known client is never removed.
+     */
+    private function cleanupStaleClients(int $currentTime): void
+    {
+        $threshold = $currentTime - self::TOKEN_EXPIRY_SECONDS;
+
+        $connection = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable(self::CLIENTS_TABLE);
+        $qb = $connection->createQueryBuilder();
+        $candidateUids = $qb
+            ->select('uid')
+            ->from(self::CLIENTS_TABLE)
+            ->where(
+                $qb->expr()->neq('client_id', $qb->createNamedParameter(self::WELL_KNOWN_CLIENT_ID)),
+                $qb->expr()->eq('deleted', $qb->createNamedParameter(0)),
+                $qb->expr()->lt('crdate', $qb->createNamedParameter($threshold)),
+                $qb->expr()->lt('last_used', $qb->createNamedParameter($threshold))
+            )
+            ->executeQuery()
+            ->fetchFirstColumn();
+        $candidateUids = array_map('intval', $candidateUids);
+
+        if (empty($candidateUids)) {
+            return;
+        }
+
+        $tokenConnection = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('tx_mcpserver_access_tokens');
+        $tqb = $tokenConnection->createQueryBuilder();
+        $activeUids = $tqb
+            ->select('client_uid')
+            ->distinct()
+            ->from('tx_mcpserver_access_tokens')
+            ->where(
+                $tqb->expr()->in('client_uid', $tqb->createNamedParameter($candidateUids, \Doctrine\DBAL\ArrayParameterType::INTEGER)),
+                $tqb->expr()->eq('deleted', $tqb->createNamedParameter(0)),
+                $tqb->expr()->gt('expires', $tqb->createNamedParameter($currentTime))
+            )
+            ->executeQuery()
+            ->fetchFirstColumn();
+        $activeUids = array_map('intval', $activeUids);
+
+        $staleUids = array_values(array_diff($candidateUids, $activeUids));
+        if (empty($staleUids)) {
+            return;
+        }
+
+        $updateQb = $connection->createQueryBuilder();
+        $updateQb
+            ->update(self::CLIENTS_TABLE)
+            ->where($updateQb->expr()->in('uid', $updateQb->createNamedParameter($staleUids, \Doctrine\DBAL\ArrayParameterType::INTEGER)))
+            ->set('deleted', 1)
+            ->set('tstamp', $currentTime)
+            ->executeStatement();
+    }
+
+    /**
+     * Record client activity so {@see self::cleanupStaleClients()} does not
+     * remove clients that are still in use. Best-effort.
+     */
+    private function touchClient(int $clientUid): void
+    {
+        if ($clientUid <= 0) {
+            return;
+        }
+        try {
+            GeneralUtility::makeInstance(ConnectionPool::class)
+                ->getConnectionForTable(self::CLIENTS_TABLE)
+                ->update(
+                    self::CLIENTS_TABLE,
+                    ['last_used' => time(), 'tstamp' => time()],
+                    ['uid' => $clientUid]
+                );
+        } catch (\Throwable $e) {
+            // Non-fatal: activity tracking must not break the token flow
+        }
     }
 
     /**
@@ -459,6 +548,8 @@ class OAuthService
         ];
         if ($plainSecret !== '') {
             $response['client_secret'] = $plainSecret;
+            // RFC 7591 §3.2.1: REQUIRED when a client_secret is issued; 0 = never expires
+            $response['client_secret_expires_at'] = 0;
         }
         return $response;
     }
@@ -726,7 +817,7 @@ class OAuthService
             'response_types_supported' => ['code'],
             'grant_types_supported' => ['authorization_code'],
             'code_challenge_methods_supported' => ['S256'],
-            'token_endpoint_auth_methods_supported' => ['none', 'client_secret_post'],
+            'token_endpoint_auth_methods_supported' => ['none', 'client_secret_post', 'client_secret_basic'],
             'registration_endpoint_auth_methods_supported' => ['none'],
         ];
     }

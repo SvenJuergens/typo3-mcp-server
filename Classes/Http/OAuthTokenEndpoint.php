@@ -41,6 +41,14 @@ class OAuthTokenEndpoint
             $codeVerifier = $parsedBody['code_verifier'] ?? null;
             $redirectUri = $parsedBody['redirect_uri'] ?? null;
 
+            // RFC 6749 §2.3.1: clients registered with client_secret_basic send their
+            // credentials via HTTP Basic auth instead of the request body.
+            $basicAuth = $this->extractBasicAuthCredentials($request);
+            if ($basicAuth !== null) {
+                $clientId = $basicAuth['client_id'];
+                $clientSecret = $basicAuth['client_secret'];
+            }
+
             // Validate required parameters
             if ($grantType !== 'authorization_code') {
                 return $this->createErrorResponse($request, 'unsupported_grant_type', 'Only authorization_code grant type is supported');
@@ -86,6 +94,30 @@ class OAuthTokenEndpoint
         } catch (\Throwable $e) {
             return $this->createErrorResponse($request, 'server_error', $e->getMessage(), 500);
         }
+    }
+
+    /**
+     * Parse HTTP Basic client authentication (RFC 6749 §2.3.1).
+     * Both client_id and client_secret are form-urlencoded before being
+     * concatenated and base64-encoded, so they must be decoded here.
+     *
+     * @return array{client_id: string, client_secret: string}|null
+     */
+    private function extractBasicAuthCredentials(ServerRequestInterface $request): ?array
+    {
+        $header = trim($request->getHeaderLine('Authorization'));
+        if (stripos($header, 'Basic ') !== 0) {
+            return null;
+        }
+        $decoded = base64_decode(substr($header, 6), true);
+        if ($decoded === false || !str_contains($decoded, ':')) {
+            return null;
+        }
+        [$clientId, $clientSecret] = explode(':', $decoded, 2);
+        return [
+            'client_id' => urldecode($clientId),
+            'client_secret' => urldecode($clientSecret),
+        ];
     }
 
     private function createErrorResponse(ServerRequestInterface $request, string $error, string $description = '', int $statusCode = 400): ResponseInterface

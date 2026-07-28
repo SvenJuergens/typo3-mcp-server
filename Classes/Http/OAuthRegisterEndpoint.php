@@ -35,7 +35,9 @@ class OAuthRegisterEndpoint
             $body = $request->getBody()->getContents();
             $clientData = json_decode($body, true);
 
-            if (!$clientData) {
+            // Note: an empty JSON object {} is a valid RFC 7591 request — every
+            // metadata field has a server-side default — so only reject non-objects.
+            if (!is_array($clientData)) {
                 return $this->createErrorResponse($request, 'invalid_request', 'Invalid JSON in request body');
             }
 

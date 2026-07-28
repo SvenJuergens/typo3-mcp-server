@@ -52,6 +52,8 @@ class OAuthClientRegistrationTest extends AbstractFunctionalTest
 
         $this->assertArrayHasKey('client_secret', $result);
         $this->assertNotEmpty($result['client_secret']);
+        // RFC 7591 §3.2.1: client_secret_expires_at is REQUIRED when a secret is issued
+        $this->assertSame(0, $result['client_secret_expires_at']);
 
         $connection = GeneralUtility::makeInstance(ConnectionPool::class)
             ->getConnectionForTable('tx_mcpserver_oauth_clients');
@@ -399,6 +401,129 @@ class OAuthClientRegistrationTest extends AbstractFunctionalTest
     {
         $this->assertSame([], $this->service->getClientsByUids([]));
         $this->assertSame([], $this->service->getClientsByUids([0, 0]));
+    }
+
+    public function testTokenEndpointAcceptsClientSecretBasic(): void
+    {
+        $registered = $this->service->registerClient([
+            'client_name' => 'Basic Auth Client',
+            'redirect_uris' => ['https://example.com/cb'],
+            'token_endpoint_auth_method' => 'client_secret_basic',
+        ]);
+        $code = $this->service->createAuthorizationCode(
+            1,
+            'Basic Auth Client',
+            '',
+            '',
+            'S256',
+            $registered['client_id']
+        );
+
+        // RFC 6749 §2.3.1: credentials are form-urlencoded, then base64-encoded
+        $basic = base64_encode(urlencode($registered['client_id']) . ':' . urlencode($registered['client_secret']));
+        $request = (new \TYPO3\CMS\Core\Http\ServerRequest('https://example.com/mcp_oauth/token', 'POST'))
+            ->withHeader('Authorization', 'Basic ' . $basic)
+            ->withParsedBody([
+                'grant_type' => 'authorization_code',
+                'code' => $code,
+            ]);
+
+        $response = (new \Hn\McpServer\Http\OAuthTokenEndpoint())($request);
+        $body = json_decode((string)$response->getBody(), true);
+
+        $this->assertSame(200, $response->getStatusCode(), (string)json_encode($body));
+        $this->assertArrayHasKey('access_token', $body);
+    }
+
+    public function testTokenEndpointRejectsWrongBasicSecret(): void
+    {
+        $registered = $this->service->registerClient([
+            'client_name' => 'Basic Auth Client',
+            'redirect_uris' => ['https://example.com/cb'],
+            'token_endpoint_auth_method' => 'client_secret_basic',
+        ]);
+        $code = $this->service->createAuthorizationCode(1, 'Basic Auth Client', '', '', 'S256', $registered['client_id']);
+
+        $basic = base64_encode(urlencode($registered['client_id']) . ':' . urlencode('wrong-secret'));
+        $request = (new \TYPO3\CMS\Core\Http\ServerRequest('https://example.com/mcp_oauth/token', 'POST'))
+            ->withHeader('Authorization', 'Basic ' . $basic)
+            ->withParsedBody([
+                'grant_type' => 'authorization_code',
+                'code' => $code,
+            ]);
+
+        $response = (new \Hn\McpServer\Http\OAuthTokenEndpoint())($request);
+        $body = json_decode((string)$response->getBody(), true);
+
+        $this->assertSame(400, $response->getStatusCode());
+        $this->assertSame('invalid_client', $body['error']);
+    }
+
+    public function testCleanupRemovesStaleClientsButKeepsActiveAndWellKnown(): void
+    {
+        $stale = $this->service->registerClient([
+            'client_name' => 'Stale',
+            'redirect_uris' => ['http://localhost'],
+        ]);
+        $active = $this->service->registerClient([
+            'client_name' => 'Active',
+            'redirect_uris' => ['http://localhost'],
+        ]);
+        $this->service->getClient(OAuthService::WELL_KNOWN_CLIENT_ID); // seed well-known
+
+        // Age all clients past the token lifetime
+        $connection = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('tx_mcpserver_oauth_clients');
+        $old = time() - 2592000 - 86400;
+        foreach ([$stale['client_id'], $active['client_id'], OAuthService::WELL_KNOWN_CLIENT_ID] as $clientId) {
+            $connection->update(
+                'tx_mcpserver_oauth_clients',
+                ['crdate' => $old, 'last_used' => 0],
+                ['client_id' => $clientId]
+            );
+        }
+
+        // Give the active client a live token
+        $activeClient = $this->service->getClient($active['client_id']);
+        $tokenConnection = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('tx_mcpserver_access_tokens');
+        $tokenConnection->insert('tx_mcpserver_access_tokens', [
+            'pid' => 0, 'tstamp' => time(), 'crdate' => time(),
+            'token' => hash('sha256', bin2hex(random_bytes(32))),
+            'token_version' => 1,
+            'be_user_uid' => 1,
+            'client_uid' => $activeClient['uid'],
+            'client_name' => 'Active',
+            'expires' => time() + 86400,
+            'last_used' => time(), 'created_ip' => '', 'last_used_ip' => '',
+        ]);
+
+        $this->service->cleanupExpired();
+
+        $this->assertNull($this->service->getClient($stale['client_id']), 'Stale client without live tokens must be removed');
+        $this->assertNotNull($this->service->getClient($active['client_id']), 'Client with a live token must be kept');
+        $this->assertNotNull($this->service->getClient(OAuthService::WELL_KNOWN_CLIENT_ID), 'Well-known client must never be removed');
+    }
+
+    public function testTokenIssuanceUpdatesClientLastUsed(): void
+    {
+        $registered = $this->service->registerClient([
+            'client_name' => 'Tracked',
+            'redirect_uris' => ['http://localhost'],
+        ]);
+        $code = $this->service->createAuthorizationCode(1, 'Tracked', '', '', 'S256', $registered['client_id']);
+        $this->assertNotNull($this->service->exchangeCodeForToken($code, null, null, null, $registered['client_id']));
+
+        $connection = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('tx_mcpserver_oauth_clients');
+        $lastUsed = (int)$connection->createQueryBuilder()
+            ->select('last_used')
+            ->from('tx_mcpserver_oauth_clients')
+            ->where('client_id = ' . $connection->quote($registered['client_id']))
+            ->executeQuery()
+            ->fetchOne();
+
+        $this->assertGreaterThan(0, $lastUsed, 'Issuing a token must record client activity for stale-client cleanup');
     }
 
     public function testLegacyTokenWithoutClientUidStillValidates(): void
