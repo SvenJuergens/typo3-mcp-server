@@ -15,6 +15,12 @@ use Psr\Http\Message\ServerRequestInterface;
 class OAuthService
 {
     public const WELL_KNOWN_CLIENT_ID = 'typo3-mcp-server';
+    /**
+     * Sentinel used only by the seeded well-known client to mean "accept any
+     * loopback URI" (RFC 8252 native app pattern). Dynamic registrations
+     * cannot store this value.
+     */
+    public const REDIRECT_URI_LOOPBACK_SENTINEL = 'loopback:*';
     private const CLIENTS_TABLE = 'tx_mcpserver_oauth_clients';
     private const CODE_EXPIRY_SECONDS = 600; // 10 minutes
     private const TOKEN_EXPIRY_SECONDS = 2592000; // 30 days
@@ -153,6 +159,18 @@ class OAuthService
             $clientIp = $request->getServerParams()['REMOTE_ADDR'] ?? '';
         }
 
+        // Atomically consume the authorization code BEFORE issuing the token, so
+        // concurrent redemption attempts with the same code can't both mint a
+        // token (RFC 6749 §4.1.2 one-time-use requirement). Only the request
+        // that actually removes the row proceeds.
+        $consumed = $connection->delete(
+            'tx_mcpserver_oauth_codes',
+            ['uid' => $authCode['uid']]
+        );
+        if ($consumed === 0) {
+            return null;
+        }
+
         // Resolve the issuing client so the token is linked to it for cascade
         // revocation and observability.
         $clientUid = 0;
@@ -184,12 +202,6 @@ class OAuthService
                 'last_used_ip' => $clientIp,
                 'token_version' => 1,
             ]
-        );
-
-        // Delete the authorization code (one-time use)
-        $connection->delete(
-            'tx_mcpserver_oauth_codes',
-            ['uid' => $authCode['uid']]
         );
 
         return [
@@ -490,13 +502,19 @@ class OAuthService
             fn($v) => is_string($v) ? trim($v) : '',
             $redirectUris
         )));
-        // Reject the wildcard sentinel that is reserved for the seeded well-known client
-        $redirectUris = array_values(array_filter($redirectUris, fn($v) => $v !== '*'));
+        // Reject sentinels reserved for the seeded well-known client
+        $reserved = ['*', self::REDIRECT_URI_LOOPBACK_SENTINEL];
+        $redirectUris = array_values(array_filter($redirectUris, fn($v) => !in_array($v, $reserved, true)));
         if (empty($redirectUris)) {
             $redirectUris = ['http://localhost'];
         }
         foreach ($redirectUris as $uri) {
-            if (parse_url($uri) === false) {
+            $parts = parse_url($uri);
+            if (!is_array($parts)
+                || empty($parts['scheme'])
+                || empty($parts['host'])
+                || !in_array(strtolower($parts['scheme']), ['http', 'https'], true)
+            ) {
                 throw new \InvalidArgumentException('Invalid redirect_uri: ' . $uri);
             }
         }
@@ -675,10 +693,13 @@ class OAuthService
     /**
      * Verify a redirect_uri against the URIs registered for a client.
      *
-     * Exact match by default. As a transition affordance, the seeded
-     * well-known client may use the '*' sentinel to accept any URI;
-     * dynamic registrations cannot use it. Loopback URIs (per RFC 8252 §7.3)
-     * are matched without comparing the port.
+     * Exact match by default. The seeded well-known client may carry the
+     * {@see self::REDIRECT_URI_LOOPBACK_SENTINEL} sentinel meaning "any
+     * loopback URI" (RFC 8252 native-app pattern) — this keeps existing
+     * MCP clients working without making the well-known client an open
+     * redirector. Dynamic registrations cannot store the sentinel.
+     * Registered loopback URIs are additionally matched with port-agnostic
+     * comparison per RFC 8252 §7.3.
      */
     public function isRedirectUriAllowed(array $client, string $redirectUri): bool
     {
@@ -691,7 +712,9 @@ class OAuthService
             return false;
         }
 
-        if (in_array('*', $registered, true)) {
+        if (in_array(self::REDIRECT_URI_LOOPBACK_SENTINEL, $registered, true)
+            && $this->isLoopbackUri($redirectUri)
+        ) {
             return true;
         }
 
@@ -706,6 +729,19 @@ class OAuthService
         }
 
         return false;
+    }
+
+    private function isLoopbackUri(string $uri): bool
+    {
+        $parts = parse_url($uri);
+        if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+            return false;
+        }
+        if (!in_array(strtolower($parts['scheme']), ['http', 'https'], true)) {
+            return false;
+        }
+        $loopbackHosts = ['localhost', '127.0.0.1', '::1', '[::1]'];
+        return in_array($parts['host'], $loopbackHosts, true);
     }
 
     private function isLoopbackUriMatch(string $registered, string $requested): bool
@@ -769,13 +805,24 @@ class OAuthService
             ->getConnectionForTable(self::CLIENTS_TABLE);
 
         try {
-            $exists = (int)$connection->createQueryBuilder()
-                ->count('uid')
+            // Look up including soft-deleted rows so we can undelete rather than
+            // fail to re-insert (client_id is intended to be unique).
+            $existing = $connection->createQueryBuilder()
+                ->select('uid', 'deleted')
                 ->from(self::CLIENTS_TABLE)
                 ->where('client_id = ' . $connection->quote(self::WELL_KNOWN_CLIENT_ID))
+                ->setMaxResults(1)
                 ->executeQuery()
-                ->fetchOne();
-            if ($exists > 0) {
+                ->fetchAssociative();
+
+            if (is_array($existing)) {
+                if ((int)($existing['deleted'] ?? 0) === 1) {
+                    $connection->update(
+                        self::CLIENTS_TABLE,
+                        ['deleted' => 0, 'tstamp' => time()],
+                        ['uid' => (int)$existing['uid']]
+                    );
+                }
                 return;
             }
 
@@ -788,10 +835,12 @@ class OAuthService
                     'client_id' => self::WELL_KNOWN_CLIENT_ID,
                     'client_secret' => '',
                     'client_name' => 'TYPO3 MCP Server',
-                    // '*' is the legacy-compatibility sentinel: this client accepts any
-                    // redirect_uri, preserving behavior for MCP clients that registered
-                    // before dynamic registration was implemented.
-                    'redirect_uris' => json_encode(['*']),
+                    // Legacy-compatibility sentinel: this client accepts any LOOPBACK
+                    // redirect_uri (any port, any path) — narrower than the previous
+                    // "accept any URI" behavior, so it's no longer an open redirector,
+                    // while still preserving native MCP clients that pinned to the
+                    // pre-DCR client_id.
+                    'redirect_uris' => json_encode([self::REDIRECT_URI_LOOPBACK_SENTINEL]),
                     'grant_types' => json_encode(['authorization_code']),
                     'scope' => 'mcp_access',
                     'token_endpoint_auth_method' => 'none',

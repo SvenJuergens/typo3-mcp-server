@@ -68,30 +68,34 @@ class OAuthClientRegistrationTest extends AbstractFunctionalTest
         $this->assertSame(hash('sha256', $result['client_secret']), $row['client_secret']);
     }
 
-    public function testWildcardRedirectUriIsRejectedForDynamicClients(): void
+    public function testWildcardSentinelsAreRejectedForDynamicClients(): void
     {
-        $result = $this->service->registerClient([
-            'client_name' => 'Try wildcard',
-            'redirect_uris' => ['*'],
-        ]);
+        foreach ([['*'], [OAuthService::REDIRECT_URI_LOOPBACK_SENTINEL]] as $attempt) {
+            $result = $this->service->registerClient([
+                'client_name' => 'Try wildcard',
+                'redirect_uris' => $attempt,
+            ]);
 
-        // The '*' is filtered out, so the default fallback is used
-        $this->assertSame(['http://localhost'], $result['redirect_uris']);
-
-        $client = $this->service->getClient($result['client_id']);
-        $this->assertSame(['http://localhost'], $client['redirect_uris']);
-        $this->assertFalse(
-            $this->service->isRedirectUriAllowed($client, 'http://attacker.example.com/cb'),
-            'Dynamic clients must never allow arbitrary redirect URIs even when they tried to register *'
-        );
+            $this->assertSame(['http://localhost'], $result['redirect_uris']);
+            $client = $this->service->getClient($result['client_id']);
+            $this->assertSame(['http://localhost'], $client['redirect_uris']);
+            $this->assertFalse(
+                $this->service->isRedirectUriAllowed($client, 'http://attacker.example.com/cb'),
+                'Dynamic clients must never allow arbitrary redirect URIs even when they tried to register a sentinel'
+            );
+        }
     }
 
-    public function testInvalidRedirectUriThrows(): void
+    public function testRegisterRejectsNonHttpRedirectUri(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
-        $this->service->registerClient([
-            'redirect_uris' => ['http:///bad'],
-        ]);
+        foreach (['javascript:alert(1)', 'data:text/html,x', '//evil.example.com', 'ftp://a/', 'http:///nohost'] as $bad) {
+            try {
+                $this->service->registerClient(['redirect_uris' => [$bad]]);
+                $this->fail('Expected InvalidArgumentException for redirect_uri: ' . $bad);
+            } catch (\InvalidArgumentException $e) {
+                $this->assertStringContainsString('Invalid redirect_uri', $e->getMessage());
+            }
+        }
     }
 
     public function testGetClientReturnsNullForUnknownId(): void
@@ -107,7 +111,48 @@ class OAuthClientRegistrationTest extends AbstractFunctionalTest
         $this->assertNotNull($client);
         $this->assertSame(OAuthService::WELL_KNOWN_CLIENT_ID, $client['client_id']);
         $this->assertSame('none', $client['token_endpoint_auth_method']);
-        $this->assertContains('*', $client['redirect_uris'], 'Well-known client must accept arbitrary redirect URIs for backward compatibility');
+        $this->assertContains(
+            OAuthService::REDIRECT_URI_LOOPBACK_SENTINEL,
+            $client['redirect_uris'],
+            'Well-known client must be seeded with the loopback sentinel for backward compatibility'
+        );
+    }
+
+    public function testWellKnownClientLoopbackSentinelOnlyAcceptsLoopback(): void
+    {
+        $client = $this->service->getClient(OAuthService::WELL_KNOWN_CLIENT_ID);
+
+        // Loopback URIs (any port, any path) MUST be accepted for BC.
+        $this->assertTrue($this->service->isRedirectUriAllowed($client, 'http://localhost'));
+        $this->assertTrue($this->service->isRedirectUriAllowed($client, 'http://localhost:6274/oauth/callback'));
+        $this->assertTrue($this->service->isRedirectUriAllowed($client, 'http://127.0.0.1:12345/cb'));
+        $this->assertTrue($this->service->isRedirectUriAllowed($client, 'https://localhost:8443/cb'));
+
+        // Non-loopback hosts MUST be rejected — the sentinel is NOT an open redirector.
+        $this->assertFalse($this->service->isRedirectUriAllowed($client, 'http://attacker.example.com/cb'));
+        $this->assertFalse($this->service->isRedirectUriAllowed($client, 'https://example.com'));
+        $this->assertFalse($this->service->isRedirectUriAllowed($client, 'http://localhost.attacker.com/cb'));
+    }
+
+    public function testWellKnownClientIsRestoredIfSoftDeleted(): void
+    {
+        // Seed once
+        $client = $this->service->getClient(OAuthService::WELL_KNOWN_CLIENT_ID);
+        $this->assertNotNull($client);
+
+        // Soft-delete the row
+        $connection = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('tx_mcpserver_oauth_clients');
+        $connection->update(
+            'tx_mcpserver_oauth_clients',
+            ['deleted' => 1],
+            ['uid' => $client['uid']]
+        );
+
+        // A subsequent lookup must self-heal — not deadlock
+        $restored = $this->service->getClient(OAuthService::WELL_KNOWN_CLIENT_ID);
+        $this->assertNotNull($restored, 'Well-known client must be restored, not skipped, when soft-deleted');
+        $this->assertSame($client['uid'], $restored['uid'], 'Should undelete the same row, not insert a duplicate');
     }
 
     public function testEnsureWellKnownClientIsIdempotent(): void
@@ -524,6 +569,19 @@ class OAuthClientRegistrationTest extends AbstractFunctionalTest
             ->fetchOne();
 
         $this->assertGreaterThan(0, $lastUsed, 'Issuing a token must record client activity for stale-client cleanup');
+    }
+
+    public function testAuthorizationCodeCannotBeRedeemedTwice(): void
+    {
+        // RFC 6749 §4.1.2: single-use. The atomicity fix deletes the code BEFORE
+        // issuing the token, so the second exchange sees no code and returns null.
+        $code = $this->service->createAuthorizationCode(1, 'test-client');
+
+        $first = $this->service->exchangeCodeForToken($code);
+        $this->assertNotNull($first, 'First redemption must succeed');
+
+        $second = $this->service->exchangeCodeForToken($code);
+        $this->assertNull($second, 'Second redemption of the same code must fail');
     }
 
     public function testLegacyTokenWithoutClientUidStillValidates(): void

@@ -39,10 +39,15 @@ class SeedWellKnownOAuthClientUpgradeWizard implements UpgradeWizardInterface
         $connection = GeneralUtility::makeInstance(ConnectionPool::class)
             ->getConnectionForTable(self::TABLE);
 
+        // A soft-deleted well-known row must still count as "needs update" so
+        // executeUpdate() re-runs ensureWellKnownClient(), which restores it.
         $count = (int)$connection->createQueryBuilder()
             ->count('uid')
             ->from(self::TABLE)
-            ->where('client_id = ' . $connection->quote(OAuthService::WELL_KNOWN_CLIENT_ID))
+            ->where(
+                'client_id = ' . $connection->quote(OAuthService::WELL_KNOWN_CLIENT_ID),
+                'deleted = 0'
+            )
             ->executeQuery()
             ->fetchOne();
 
