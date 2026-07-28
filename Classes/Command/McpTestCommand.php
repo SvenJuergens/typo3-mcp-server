@@ -9,6 +9,7 @@ use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
+use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use Hn\McpServer\MCP\ToolRegistry;
 use Hn\McpServer\Service\WorkspaceContextService;
@@ -159,6 +160,7 @@ class McpTestCommand extends Command
             // Set admin flag directly since setTemporaryAdminFlag doesn't exist in TYPO3 v12
             $beUser->user['admin'] = 1;
             $beUser->user['uid'] = 1; // Add a UID for the fake user to prevent DataHandler errors
+            $this->restoreStoredUserConfiguration($beUser);
             $GLOBALS['BE_USER'] = $beUser;
             
             // Set up workspace context
@@ -180,7 +182,27 @@ class McpTestCommand extends Command
             $workspaceId = $workspaceService->switchToOptimalWorkspace($beUser);
         }
     }
-    
+
+    /**
+     * Load the stored user configuration (uc) of the impersonated backend user.
+     * If $beUser->uc stayed empty, a writeUC() triggered during tool execution
+     * (e.g. by the update signals fired on workspace creation) would overwrite
+     * the real user's backend preferences in the be_users record.
+     */
+    protected function restoreStoredUserConfiguration(BackendUserAuthentication $beUser): void
+    {
+        $storedUc = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('be_users')
+            ->select(['uc'], 'be_users', ['uid' => (int)$beUser->user['uid']])
+            ->fetchOne();
+        if (is_string($storedUc)) {
+            $uc = unserialize($storedUc, ['allowed_classes' => false]);
+            if (is_array($uc)) {
+                $beUser->uc = $uc;
+            }
+        }
+    }
+
     /**
      * Ensure TCA is loaded
      */

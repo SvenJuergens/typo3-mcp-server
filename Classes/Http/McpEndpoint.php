@@ -250,6 +250,20 @@ class McpEndpoint
 
         if ($userData) {
             $beUser->user = $userData;
+
+            // CRITICAL: Restore the user's stored configuration (uc). The regular
+            // authentication flow unserializes it via unpack_uc(), which token auth
+            // bypasses. Without this, $beUser->uc stays empty and any writeUC()
+            // triggered during request processing (e.g. the update signals fired
+            // when the MCP workspace is created below) overwrites the user's
+            // stored backend preferences with a nearly empty array. That in turn
+            // breaks the backend Setup module, which expects keys like 'titleLen'
+            // to exist ("Undefined array key" warning in SetupModuleController).
+            $storedUc = unserialize((string)($userData['uc'] ?? ''), ['allowed_classes' => false]);
+            if (is_array($storedUc)) {
+                $beUser->uc = $storedUc;
+            }
+
             $GLOBALS['BE_USER'] = $beUser;
 
             // CRITICAL: Initialize an (anonymous) user session.
