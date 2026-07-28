@@ -77,7 +77,15 @@ class McpEndpointUcPreservationTest extends AbstractFunctionalTest
         $GLOBALS['TYPO3_REQUEST'] = $request;
 
         $endpoint = new McpEndpoint();
-        $endpoint($request);
+        $response = $endpoint($request);
+
+        // The JSON-RPC processing itself cannot succeed in this environment:
+        // the SDK's StandardPhpAdapter builds its request via
+        // HttpMessage::fromGlobals(), and PHPUnit's CLI process provides
+        // neither REQUEST_METHOD nor a fillable php://input. A 401 however
+        // would mean the token authentication - and with it the impersonation
+        // path under test - never ran.
+        $this->assertNotSame(401, $response->getStatusCode());
 
         // The impersonated backend user must carry the stored configuration
         // in memory, exactly like a regularly authenticated user would.
@@ -105,5 +113,57 @@ class McpEndpointUcPreservationTest extends AbstractFunctionalTest
             'Persisting the uc during an MCP request must not wipe the stored backend preferences'
         );
         $this->assertSame('de', $persistedUc['lang'] ?? null);
+    }
+
+    public function testDefaultsAreAppliedForUserWithoutStoredConfiguration(): void
+    {
+        // Simulate a user who never logged into the backend: no stored uc yet.
+        // Such a user must get the uc defaults applied during impersonation,
+        // exactly like initializeBackendLogin() does on a first regular login.
+        // Otherwise the first writeUC() persists a nearly empty uc, and core
+        // never re-applies the defaults afterwards (backendSetUC() only fills
+        // them in while uc is completely empty).
+        $this->getConnectionForTable('be_users')->update(
+            'be_users',
+            ['uc' => ''],
+            ['uid' => 1]
+        );
+
+        $oauthService = GeneralUtility::makeInstance(OAuthService::class);
+        $tokenData = $oauthService->createToken(1, 'uc-defaults-test-client');
+
+        $request = new ServerRequest(
+            new Uri('https://example.com/mcp'),
+            'POST',
+            'php://input',
+            [
+                'Authorization' => 'Bearer ' . $tokenData['access_token'],
+                'Content-Type' => 'application/json',
+            ]
+        );
+        $GLOBALS['TYPO3_REQUEST'] = $request;
+
+        $endpoint = new McpEndpoint();
+        $response = $endpoint($request);
+        $this->assertNotSame(401, $response->getStatusCode());
+
+        $this->assertArrayHasKey(
+            'titleLen',
+            $GLOBALS['BE_USER']->uc,
+            'A user without stored settings must get the uc defaults applied'
+        );
+
+        $persistedUc = unserialize(
+            (string)$this->getConnectionForTable('be_users')
+                ->select(['uc'], 'be_users', ['uid' => 1])
+                ->fetchOne(),
+            ['allowed_classes' => false]
+        );
+        $this->assertIsArray($persistedUc);
+        $this->assertArrayHasKey(
+            'titleLen',
+            $persistedUc,
+            'The persisted uc of a first-time user must contain the defaults, not a nearly empty array'
+        );
     }
 }

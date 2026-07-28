@@ -279,6 +279,15 @@ class McpEndpoint
             // Without this, non-admin users have no permissions computed from their groups
             $beUser->fetchGroupData();
 
+            // Apply the uc defaults and TSconfig overrides, exactly like
+            // initializeBackendLogin() does after fetchGroupData() on a regular
+            // login. This covers users who never logged into the backend: their
+            // stored uc is empty, and without the defaults the first writeUC()
+            // would persist a nearly empty uc - which core never repairs, since
+            // backendSetUC() only fills in the defaults while uc is completely
+            // empty.
+            $beUser->backendSetUC();
+
             // Initialize language service (required for DataHandler and other core components)
             $this->initializeLanguageService($beUser);
 
