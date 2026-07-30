@@ -306,6 +306,54 @@ class WriteTableLanguageTest extends FunctionalTestCase
     }
 
     /**
+     * A validation error in the provided field values must be reported BEFORE
+     * the translation is created - otherwise a corrected retry would fail with
+     * "Translation already exists" because of the leftover placeholder record.
+     */
+    public function testTranslateWithInvalidFieldCreatesNoOrphanTranslation(): void
+    {
+        $tool = new WriteTableTool();
+
+        $createResult = $tool->execute([
+            'action' => 'create',
+            'table' => 'tt_content',
+            'pid' => 1,
+            'data' => ['CType' => 'text', 'header' => 'Original'],
+        ]);
+        $this->assertFalse($createResult->isError, json_encode($createResult->jsonSerialize()));
+        $originalUid = json_decode($createResult->content[0]->text, true)['uid'];
+
+        $translateResult = $tool->execute([
+            'action' => 'translate',
+            'table' => 'tt_content',
+            'uid' => $originalUid,
+            'data' => [
+                'sys_language_uid' => 'de',
+                'no_such_field' => 'boom',
+            ],
+        ]);
+        $this->assertTrue($translateResult->isError, 'Invalid field must produce an error');
+
+        // No translation row may exist - a retry with corrected data must succeed
+        $retryResult = $tool->execute([
+            'action' => 'translate',
+            'table' => 'tt_content',
+            'uid' => $originalUid,
+            'data' => [
+                'sys_language_uid' => 'de',
+                'header' => 'Deutscher Titel',
+            ],
+        ]);
+        $this->assertFalse($retryResult->isError, 'Retry after a validation error must succeed: '
+            . json_encode($retryResult->jsonSerialize()));
+        $translationUid = json_decode($retryResult->content[0]->text, true)['translationUid'];
+        $this->assertIsInt($translationUid);
+
+        $translation = \TYPO3\CMS\Backend\Utility\BackendUtility::getRecord('tt_content', $translationUid);
+        $this->assertEquals('Deutscher Titel', $translation['header']);
+    }
+
+    /**
      * Test translate action with invalid language
      */
     public function testTranslateWithInvalidLanguage(): void

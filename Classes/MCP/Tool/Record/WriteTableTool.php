@@ -935,6 +935,29 @@ class WriteTableTool extends AbstractRecordTool
             return $this->createErrorResult('Translation already exists for language "' . $targetIsoCode . '" (UID: ' . $existingTranslation . ')');
         }
 
+        // The field values that will be applied to the new translation
+        // (everything except the language control fields).
+        $fieldValues = $data;
+        unset(
+            $fieldValues['sys_language_uid'],
+            $fieldValues[$languageField],
+            $fieldValues[$translationParentField],
+            $fieldValues['pid'],
+            $fieldValues['uid']
+        );
+
+        // Validate them BEFORE creating the translation: a validation error
+        // (unknown field, bad value) must not leave a half-done placeholder
+        // translation behind that would make a corrected retry fail with
+        // "Translation already exists".
+        if (!empty($fieldValues)) {
+            $probe = $fieldValues;
+            $validationResult = $this->validateRecordData($table, $probe, 'update', $uid);
+            if ($validationResult !== true) {
+                return $this->createErrorResult('Validation error: ' . $validationResult);
+            }
+        }
+
         // Use DataHandler to create the translation
         $dataHandler = GeneralUtility::makeInstance(DataHandler::class);
         $dataHandler->BE_USER = $GLOBALS['BE_USER'];
@@ -986,15 +1009,8 @@ class WriteTableTool extends AbstractRecordTool
         // documents `data` as required for translate). DataHandler's localize
         // only produces "[Translate to ...]" placeholder copies - without this
         // step the provided translations would be silently dropped and a second
-        // update call would be needed.
-        $fieldValues = $data;
-        unset(
-            $fieldValues['sys_language_uid'],
-            $fieldValues[$languageField],
-            $fieldValues[$translationParentField],
-            $fieldValues['pid'],
-            $fieldValues['uid']
-        );
+        // update call would be needed. The values were validated above, before
+        // the translation was created.
         if ($newTranslationUid && !empty($fieldValues)) {
             $updateResult = $this->updateRecord($table, (int)$newTranslationUid, $fieldValues, null, false);
             if ($updateResult->isError) {
@@ -1007,8 +1023,11 @@ class WriteTableTool extends AbstractRecordTool
         }
 
         if ($newTranslationUid) {
+            // Dispatch the same normalized representation that updateRecord()
+            // persists (dates as timestamps etc.), not the raw tool input.
+            $eventFieldValues = !empty($fieldValues) ? $this->convertDataForStorage($table, $fieldValues) : [];
             $eventDispatcher = GeneralUtility::makeInstance(EventDispatcherInterface::class);
-            $eventDispatcher->dispatch(new AfterRecordWriteEvent($table, 'translate', (int)$newTranslationUid, $fieldValues, null));
+            $eventDispatcher->dispatch(new AfterRecordWriteEvent($table, 'translate', (int)$newTranslationUid, $eventFieldValues, null));
         }
 
         return $this->createJsonResult([

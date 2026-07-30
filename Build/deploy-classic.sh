@@ -18,8 +18,11 @@
 
 set -euo pipefail
 
-TYPO3_ROOT=${1:?Usage: Build/deploy-classic.sh /path/to/typo3-root [docker-container-name]}
+TYPO3_ROOT=${1:?Usage: Build/deploy-classic.sh /path/to/typo3-root [docker-container-name] [container-typo3-root]}
 CONTAINER=${2:-}
+# TYPO3 root inside the container (only used with a container name);
+# /var/www/html matches the official php:*-apache images.
+CONTAINER_ROOT=${3:-/var/www/html}
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EXT_DIR="$TYPO3_ROOT/typo3conf/ext/mcp_server"
@@ -31,8 +34,9 @@ fi
 
 echo "Deploying $(git -C "$REPO_ROOT" rev-parse --short HEAD) ($(git -C "$REPO_ROOT" branch --show-current)) to $EXT_DIR"
 
-if ! git -C "$REPO_ROOT" diff --quiet HEAD -- Classes Configuration Resources ext_localconf.php ext_tables.php ext_tables.sql ext_conf_template.txt ext_emconf.php 2>/dev/null; then
-    echo "WARNING: uncommitted changes in extension files are NOT deployed (git HEAD is exported)." >&2
+# git status --porcelain also reports untracked files, which `git diff` would miss
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- Classes Configuration Resources ext_localconf.php ext_tables.php ext_tables.sql ext_conf_template.txt ext_emconf.php 2>/dev/null)" ]; then
+    echo "WARNING: uncommitted or untracked changes in extension files are NOT deployed (git HEAD is exported)." >&2
 fi
 
 # Export only tracked files of HEAD (no .git, no .Build, no local cruft),
@@ -53,14 +57,14 @@ rsync -a --delete \
 # (same as Build/build-ter.sh does for the TER zip).
 if [ -n "$CONTAINER" ]; then
     echo "Installing bundled libraries in container '$CONTAINER'..."
-    docker exec -w /var/www/html/typo3conf/ext/mcp_server/Resources/Private/PHP "$CONTAINER" \
+    docker exec -w "$CONTAINER_ROOT/typo3conf/ext/mcp_server/Resources/Private/PHP" "$CONTAINER" \
         composer install --no-dev --optimize-autoloader --classmap-authoritative --no-interaction --quiet
-    docker exec -w /var/www/html/typo3conf/ext/mcp_server/Resources/Private/PHP "$CONTAINER" \
+    docker exec -w "$CONTAINER_ROOT/typo3conf/ext/mcp_server/Resources/Private/PHP" "$CONTAINER" \
         rm -rf vendor/psr/log
 
     echo "Running extension:setup + cache:flush in container '$CONTAINER'..."
-    docker exec "$CONTAINER" typo3/sysext/core/bin/typo3 extension:setup --extension=mcp_server
-    docker exec "$CONTAINER" typo3/sysext/core/bin/typo3 cache:flush
+    docker exec -w "$CONTAINER_ROOT" "$CONTAINER" typo3/sysext/core/bin/typo3 extension:setup --extension=mcp_server
+    docker exec -w "$CONTAINER_ROOT" "$CONTAINER" typo3/sysext/core/bin/typo3 cache:flush
     echo "Done. Extension deployed and set up."
 else
     echo "Installing bundled libraries on the host..."
