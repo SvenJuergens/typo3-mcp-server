@@ -354,8 +354,12 @@ class UploadFileTool extends AbstractRecordTool
             $ips = [$host];
             $isLiteral = true;
         } else {
-            $ips = gethostbynamel($host) ?: [];
-            foreach (dns_get_record($host, DNS_AAAA) ?: [] as $record) {
+            $ips = @gethostbynamel($host) ?: [];
+            // AAAA lookups fail or time out in plenty of environments (IPv6-less
+            // Docker networks, filtering resolvers). Suppress that so a broken
+            // AAAA lookup cannot kill a download that has usable A records - but
+            // never skip validation of records we did get.
+            foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $record) {
                 if (!empty($record['ipv6'])) {
                     $ips[] = $record['ipv6'];
                 }
