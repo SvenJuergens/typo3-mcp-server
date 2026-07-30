@@ -216,6 +216,18 @@ class FileUploadEndpointTest extends FunctionalTestCase
         $this->assertEquals(401, $retry->getStatusCode(), 'A token must not survive a failed upload attempt');
     }
 
+    public function testExecutableFileIsRejectedAtTheEndpointToo(): void
+    {
+        // The pre-signed endpoint is a second door into the same storage; the
+        // executable-file guard must apply there as well.
+        $token = $this->createToken();
+        $response = $this->dispatchUpload($token, '<?php echo 1;', ['fileName' => 'evil.php']);
+
+        $this->assertEquals(400, $response->getStatusCode(), (string)$response->getBody());
+        $this->assertStringContainsString('not allowed', json_decode((string)$response->getBody(), true)['error']);
+        $this->assertFileDoesNotExist(Environment::getPublicPath() . '/fileadmin/user_upload/evil.php');
+    }
+
     public function testGetMethodIsRejected(): void
     {
         $response = $this->dispatchUpload($this->createToken(), '', [], 'GET');

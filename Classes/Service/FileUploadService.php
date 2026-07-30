@@ -36,9 +36,31 @@ class FileUploadService implements SingletonInterface
     protected const UPLOAD_TOKEN_LIFETIME = 900; // 15 minutes
 
     /**
-     * Browser-executable formats; see the check in storeFile().
+     * Formats a browser would execute in the site's origin (stored XSS).
+     * TYPO3's fileDenyPattern does not cover these - it only guards against
+     * server-side execution.
      */
-    protected const DENIED_EXTENSIONS = ['htm', 'html', 'xhtml', 'shtml', 'js', 'mjs', 'svgz', 'swf', 'hta'];
+    protected const BROWSER_EXECUTABLE_EXTENSIONS = ['htm', 'html', 'xhtml', 'js', 'mjs', 'svgz', 'swf', 'hta'];
+
+    /**
+     * Formats the server itself could execute. TYPO3's fileDenyPattern already
+     * blocks these, but it is a configurable setting an integrator can loosen,
+     * so uploads coming in through MCP refuse them independently.
+     */
+    protected const SERVER_EXECUTABLE_EXTENSIONS = [
+        'php', 'php3', 'php4', 'php5', 'php6', 'php7', 'php8', 'phps', 'phpsh', 'phtml', 'phtm', 'pht', 'phar',
+        'shtml', 'shtm', 'cgi', 'pl', 'py', 'rb', 'sh', 'htaccess',
+    ];
+
+    /**
+     * Exact file names that reconfigure the server rather than being executed
+     * themselves. ".user.ini" is the notable one: with PHP running as CGI/FPM it
+     * sets per-directory PHP options such as auto_prepend_file, and unlike
+     * ".htaccess" it is NOT part of TYPO3's fileDenyPattern. Today it is stopped
+     * only incidentally, because the extension "ini" has no matching mime type -
+     * too accidental a defense to rely on.
+     */
+    protected const DENIED_FILE_NAMES = ['.user.ini', '.htaccess', '.htpasswd', 'web.config'];
 
     /**
      * Resolve the target folder, creating missing folders along the way.
@@ -183,16 +205,7 @@ class FileUploadService implements SingletonInterface
             );
         }
 
-        // TYPO3's fileDenyPattern only blocks server-side execution (.php,
-        // .htaccess, ...). Files served from fileadmin share the origin of the
-        // backend, so browser-executable formats are rejected here as well.
-        $extension = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
-        if (in_array($extension, self::DENIED_EXTENSIONS, true)) {
-            throw new \InvalidArgumentException(
-                'Files with the extension ".' . $extension . '" are not allowed because they could run '
-                . 'script code in the browser when served from the file storage.'
-            );
-        }
+        $this->assertFileNameIsAllowed($fileName);
 
         // Identical content in this storage? Return the existing file instead of
         // creating a copy - this also makes retries after timeouts idempotent.
@@ -232,6 +245,48 @@ class FileUploadService implements SingletonInterface
         }
 
         return ['file' => $file, 'deduplicated' => false];
+    }
+
+    /**
+     * Refuse files that could be executed - by the server or by a visitor's
+     * browser - or that reconfigure the server. Deliberately independent of
+     * TYPO3's configurable fileDenyPattern and of the mime-consistency check,
+     * so the guarantee holds no matter how an installation is configured.
+     */
+    protected function assertFileNameIsAllowed(string $fileName): void
+    {
+        $lowerName = strtolower($fileName);
+        if (in_array($lowerName, self::DENIED_FILE_NAMES, true)) {
+            throw new \InvalidArgumentException(
+                'The file name "' . $fileName . '" is not allowed because a file with that name reconfigures '
+                . 'the web server or PHP.'
+            );
+        }
+
+        $extension = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+        if (in_array($extension, self::SERVER_EXECUTABLE_EXTENSIONS, true)) {
+            throw new \InvalidArgumentException(
+                'Files with the extension ".' . $extension . '" are not allowed because they could be executed '
+                . 'on the server.'
+            );
+        }
+        if (in_array($extension, self::BROWSER_EXECUTABLE_EXTENSIONS, true)) {
+            throw new \InvalidArgumentException(
+                'Files with the extension ".' . $extension . '" are not allowed because they could run '
+                . 'script code in the browser when served from the file storage.'
+            );
+        }
+
+        // "evil.php.jpg" and friends: on servers that map by any extension in
+        // the name, an inner executable extension is enough.
+        foreach (explode('.', $lowerName) as $part) {
+            if (in_array($part, self::SERVER_EXECUTABLE_EXTENSIONS, true)) {
+                throw new \InvalidArgumentException(
+                    'The file name "' . $fileName . '" is not allowed because it contains the potentially '
+                    . 'executable extension ".' . $part . '".'
+                );
+            }
+        }
     }
 
     /**

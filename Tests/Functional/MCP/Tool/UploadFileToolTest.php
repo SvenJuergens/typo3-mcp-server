@@ -8,6 +8,7 @@ use GuzzleHttp\Promise\FulfilledPromise;
 use GuzzleHttp\Psr7\Response;
 use Hn\McpServer\MCP\Tool\File\UploadFileTool;
 use Hn\McpServer\Service\SiteInformationService;
+use PHPUnit\Framework\Attributes\DataProvider;
 use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
 use TYPO3\CMS\Core\Http\NormalizedParams;
 use TYPO3\CMS\Core\Http\ServerRequest;
@@ -223,6 +224,61 @@ class UploadFileToolTest extends FunctionalTestCase
             ['content' => '<?php echo 1;', 'fileName' => 'evil.php', 'targetFolder' => '/user_upload/'],
             'extension'
         );
+    }
+
+    /**
+     * TYPO3 is a PHP application, so a smuggled-in executable file is the worst
+     * case. The core fileDenyPattern covers most of this, but it is a
+     * configurable setting, so the upload path refuses these independently.
+     */
+    #[DataProvider('executableFileNameProvider')]
+    public function testExecutableAndServerConfigFilesAreRejected(string $fileName, string $content): void
+    {
+        $this->assertUploadError(
+            ['content' => $content, 'fileName' => $fileName, 'targetFolder' => '/user_upload/'],
+            'not allowed'
+        );
+
+        $qb = GeneralUtility::makeInstance(ConnectionPool::class)->getQueryBuilderForTable('sys_file');
+        $qb->getRestrictions()->removeAll();
+        $this->assertEquals(
+            0,
+            (int)$qb->count('uid')->from('sys_file')->executeQuery()->fetchOne(),
+            'No sys_file record may exist after a rejected upload of "' . $fileName . '"'
+        );
+        $this->assertFileDoesNotExist(
+            Environment::getPublicPath() . '/fileadmin/user_upload/' . $fileName,
+            'The rejected file "' . $fileName . '" must not be on disk'
+        );
+    }
+
+    public static function executableFileNameProvider(): array
+    {
+        $php = '<?php echo 1;';
+        return [
+            // Server-side execution
+            'php' => ['evil.php', $php],
+            'php uppercase' => ['EVIL.PHP', $php],
+            'phtml' => ['evil.phtml', $php],
+            'php5' => ['evil.php5', $php],
+            'phar' => ['evil.phar', $php],
+            'pht' => ['evil.pht', $php],
+            'phps' => ['evil.phps', $php],
+            'shtml' => ['evil.shtml', '<!--#exec cmd="ls"-->'],
+            'cgi' => ['evil.cgi', "#!/bin/sh\nls"],
+            'perl' => ['evil.pl', 'print "x";'],
+            'shell' => ['evil.sh', "#!/bin/sh\nls"],
+            // Double extensions: enough on servers mapping by any extension
+            'php before jpg' => ['evil.php.jpg', $php],
+            'jpg before php' => ['evil.jpg.php', $php],
+            'php in the middle' => ['report.php.txt', $php],
+            // Server/PHP reconfiguration
+            'htaccess' => ['.htaccess', 'AddHandler application/x-httpd-php .jpg'],
+            'user.ini' => ['.user.ini', "[PHP]\nauto_prepend_file = \"/tmp/x\"\n"],
+            'user.ini uppercase' => ['.USER.INI', "[PHP]\nauto_prepend_file = \"/tmp/x\"\n"],
+            'htpasswd' => ['.htpasswd', 'admin:hash'],
+            'web.config' => ['web.config', '<configuration/>'],
+        ];
     }
 
     public function testFileNameWithoutExtensionIsRejected(): void
