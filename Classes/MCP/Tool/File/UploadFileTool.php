@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace Hn\McpServer\MCP\Tool\File;
 
 use GuzzleHttp\Exception\GuzzleException;
-use GuzzleHttp\RedirectMiddleware;
+use GuzzleHttp\Psr7\UriResolver;
+use GuzzleHttp\Psr7\Utils;
 use Hn\McpServer\MCP\Tool\Record\AbstractRecordTool;
 use Hn\McpServer\Service\FileUploadService;
 use Hn\McpServer\Service\SiteInformationService;
@@ -16,6 +17,7 @@ use TYPO3\CMS\Core\Resource\Exception\InsufficientFolderWritePermissionsExceptio
 use TYPO3\CMS\Core\Resource\Exception\OnlineMediaAlreadyExistsException;
 use TYPO3\CMS\Core\Resource\File;
 use TYPO3\CMS\Core\Resource\Folder;
+use TYPO3\CMS\Core\Resource\MimeTypeDetector;
 use TYPO3\CMS\Core\Resource\OnlineMedia\Helpers\OnlineMediaHelperRegistry;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 
@@ -35,19 +37,16 @@ class UploadFileTool extends AbstractRecordTool
     protected const MAX_REDIRECTS = 5;
 
     /**
-     * Fallback extension per content type for URLs whose path carries no
-     * usable file name (e.g. "https://example.com/image?id=4").
+     * Internal/special-purpose IPv4 ranges that PHP's NO_PRIV_RANGE/NO_RES_RANGE
+     * filter flags do NOT cover. The documentation ranges (TEST-NET-1..3) stay
+     * allowed on purpose: they are not routable, and the functional tests use
+     * them as safe "public" IP literals.
      */
-    protected const MIME_TO_EXTENSION = [
-        'image/jpeg' => 'jpg',
-        'image/png' => 'png',
-        'image/gif' => 'gif',
-        'image/webp' => 'webp',
-        'image/avif' => 'avif',
-        'image/svg+xml' => 'svg',
-        'application/pdf' => 'pdf',
-        'video/mp4' => 'mp4',
-        'audio/mpeg' => 'mp3',
+    protected const BLOCKED_IPV4_CIDRS = [
+        '100.64.0.0/10', // CGNAT - cloud-internal, e.g. Alibaba metadata 100.100.100.200
+        '192.0.0.0/24',  // IETF protocol assignments
+        '198.18.0.0/15', // benchmarking
+        '224.0.0.0/4',   // multicast
     ];
 
     public function getSchema(): array
@@ -140,6 +139,13 @@ class UploadFileTool extends AbstractRecordTool
             if ($requestedFileName === '') {
                 return $this->createErrorResult('"fileName" is required when uploading "content".');
             }
+            $maxBytes = $uploadService->getMaxFileBytes();
+            if (strlen($content) > $maxBytes) {
+                return $this->createErrorResult(
+                    'The content exceeds the maximum size of ' . round($maxBytes / 1048576) . ' MiB '
+                    . '(configurable via the extension setting "maxFileSizeMb").'
+                );
+            }
             $tempPath = GeneralUtility::tempnam('mcp_upload_');
             if (@file_put_contents($tempPath, $content) === false) {
                 @unlink($tempPath);
@@ -181,20 +187,23 @@ class UploadFileTool extends AbstractRecordTool
         }
 
         $tokenData = $uploadService->createUploadToken($folder, $fileName);
-        $uploadUrl = $endpointUrl . '?token=' . $tokenData['token'];
 
+        // The token travels as an Authorization header, not in the URL: query
+        // strings end up in webserver and proxy logs.
         $curlFileName = $fileName !== '' ? $fileName : 'photo.jpg';
-        $curlUrl = $uploadUrl . ($fileName === '' ? '&fileName=' . $curlFileName : '');
+        $curlUrl = $endpointUrl . ($fileName === '' ? '?fileName=' . rawurlencode($curlFileName) : '');
 
         return $this->createJsonResult([
-            'uploadUrl' => $uploadUrl,
+            'uploadUrl' => $endpointUrl,
+            'uploadToken' => $tokenData['token'],
             'targetFolder' => $folder->getCombinedIdentifier(),
             'fileName' => $fileName !== '' ? $fileName : null,
             'validUntil' => date('c', $tokenData['validUntil']),
-            'instructions' => 'Send the raw file bytes via HTTP PUT (or POST) to the uploadUrl, e.g.: '
-                . "curl -sS -T '" . $curlFileName . "' '" . $curlUrl . "'"
+            'instructions' => 'Send the raw file bytes via HTTP PUT (or POST) to the uploadUrl, '
+                . 'passing the uploadToken as bearer token, e.g.: '
+                . "curl -sS -T '" . $curlFileName . "' -H 'Authorization: Bearer " . $tokenData['token'] . "' '" . $curlUrl . "'"
                 . ($fileName === '' ? ' - replace the fileName query parameter with the actual file name including extension.' : '')
-                . ' The URL is single-use and expires at validUntil. '
+                . ' The token is single-use and expires at validUntil. '
                 . 'The endpoint responds with JSON containing the created file (uid, fileName, publicUrl, ...); '
                 . 'use that uid with WriteTable to reference the file from a record.',
         ]);
@@ -219,65 +228,67 @@ class UploadFileTool extends AbstractRecordTool
     }
 
     /**
-     * Download a remote file to a temp path. Redirects are followed by Guzzle,
-     * but every hop is re-validated against the SSRF rules via on_redirect.
+     * Download a remote file to a temp path. Redirects are followed manually
+     * so that EVERY hop is both validated against the SSRF rules and pinned
+     * to the IP that was validated (DNS rebinding would otherwise allow a
+     * second lookup between the check and the actual connect).
      * Returns [tempPath, fileName].
      *
      * @return array{0: string, 1: string}
      */
     protected function downloadFile(string $url, string $requestedFileName, int $maxBytes): array
     {
-        $resolvedIp = $this->assertPublicHttpUrl($url);
+        $currentUrl = $url;
+        $response = null;
+        for ($hop = 0; $hop <= self::MAX_REDIRECTS; $hop++) {
+            $resolvedIp = $this->assertPublicHttpUrl($currentUrl);
 
-        $options = [
-            'allow_redirects' => [
-                'max' => self::MAX_REDIRECTS,
-                'strict' => true,
-                'referer' => false,
-                'protocols' => ['http', 'https'],
-                'track_redirects' => true,
-                'on_redirect' => function ($request, $response, $uri): void {
-                    $this->assertPublicHttpUrl((string)$uri);
-                },
-            ],
-            'http_errors' => false,
-            'stream' => true,
-            'connect_timeout' => 10,
-            'timeout' => 300,
-            'headers' => ['User-Agent' => 'TYPO3-MCP-Server'],
-        ];
-        // Pin the vetted IP so the actual request cannot be re-routed to an
-        // internal address via DNS rebinding (honored by the curl handler;
-        // harmless elsewhere). Only possible for the first hop - redirect
-        // targets are still host-validated in on_redirect above.
-        $parts = parse_url($url);
-        $host = $parts['host'] ?? '';
-        if ($resolvedIp !== null && !filter_var($host, FILTER_VALIDATE_IP) && defined('CURLOPT_RESOLVE')) {
-            $port = $parts['port'] ?? (($parts['scheme'] ?? 'https') === 'https' ? 443 : 80);
-            $options['curl'] = [\CURLOPT_RESOLVE => [$host . ':' . $port . ':' . $resolvedIp]];
+            $options = [
+                'allow_redirects' => false,
+                'http_errors' => false,
+                'stream' => true,
+                'connect_timeout' => 10,
+                'timeout' => 300,
+                'headers' => ['User-Agent' => 'TYPO3-MCP-Server'],
+            ];
+            // Pin the vetted IP so the actual connect cannot be re-routed to an
+            // internal address via DNS rebinding (honored by the curl handler;
+            // harmless elsewhere). Skipped when TYPO3 routes HTTP through a
+            // proxy: the proxy resolves the host itself, pinning would break it.
+            $parts = parse_url($currentUrl);
+            $host = $parts['host'] ?? '';
+            $proxyConfigured = !empty($GLOBALS['TYPO3_CONF_VARS']['HTTP']['proxy']);
+            if (!$proxyConfigured && $resolvedIp !== null && !filter_var($host, FILTER_VALIDATE_IP) && defined('CURLOPT_RESOLVE')) {
+                $port = $parts['port'] ?? (($parts['scheme'] ?? 'https') === 'https' ? 443 : 80);
+                $options['curl'] = [\CURLOPT_RESOLVE => [$host . ':' . $port . ':' . $resolvedIp]];
+            }
+
+            try {
+                $response = GeneralUtility::makeInstance(RequestFactory::class)->request($currentUrl, 'GET', $options);
+            } catch (GuzzleException $e) {
+                throw new \InvalidArgumentException('Downloading the URL failed: ' . $e->getMessage(), 0, $e);
+            }
+
+            if (!in_array($response->getStatusCode(), [301, 302, 303, 307, 308], true)) {
+                break;
+            }
+
+            $location = $response->getHeaderLine('Location');
+            if ($location === '') {
+                throw new \InvalidArgumentException('The URL redirected without a Location header.');
+            }
+            $currentUrl = (string)UriResolver::resolve(Utils::uriFor($currentUrl), Utils::uriFor($location));
+            $response = null;
         }
-
-        try {
-            $response = GeneralUtility::makeInstance(RequestFactory::class)->request($url, 'GET', $options);
-        } catch (GuzzleException $e) {
-            // Re-throw SSRF violations from on_redirect with their original message
-            $previous = $e->getPrevious();
-            if ($previous instanceof \InvalidArgumentException) {
-                throw $previous;
-            }
-            if ($e instanceof \InvalidArgumentException) {
-                throw $e;
-            }
-            throw new \InvalidArgumentException('Downloading the URL failed: ' . $e->getMessage(), 0, $e);
+        if ($response === null) {
+            throw new \InvalidArgumentException('The URL redirected more than ' . self::MAX_REDIRECTS . ' times.');
         }
 
         if ($response->getStatusCode() !== 200) {
             throw new \InvalidArgumentException('Downloading the URL failed with HTTP status ' . $response->getStatusCode() . '.');
         }
 
-        // The final URL after redirects (Guzzle records the hops in a response header)
-        $redirectHistory = $response->getHeader(RedirectMiddleware::HISTORY_HEADER);
-        $finalUrl = $redirectHistory !== [] ? (string)end($redirectHistory) : $url;
+        $finalUrl = $currentUrl;
 
         $tempPath = GeneralUtility::tempnam('mcp_upload_');
         $handle = fopen($tempPath, 'wb');
@@ -356,14 +367,55 @@ class UploadFileTool extends AbstractRecordTool
         }
 
         foreach ($ips as $ip) {
-            if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
-                throw new \InvalidArgumentException(
-                    'The URL points to a private or reserved network address and cannot be downloaded.'
-                );
-            }
+            $this->assertPublicIp($ip);
         }
 
         return $isLiteral ? null : $ips[0];
+    }
+
+    /**
+     * Reject private, reserved, and cloud-internal addresses, including IPv4
+     * addresses embedded in IPv6 (mapped, NAT64, 6to4), which would otherwise
+     * smuggle e.g. 127.0.0.1 past the IPv4 checks.
+     */
+    protected function assertPublicIp(string $ip): void
+    {
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+            throw new \InvalidArgumentException(
+                'The URL points to a private or reserved network address and cannot be downloaded.'
+            );
+        }
+
+        $binary = inet_pton($ip);
+        if ($binary === false) {
+            throw new \InvalidArgumentException('The URL resolves to an invalid IP address.');
+        }
+
+        if (strlen($binary) === 4) {
+            foreach (self::BLOCKED_IPV4_CIDRS as $cidr) {
+                [$net, $bits] = explode('/', $cidr);
+                $mask = -1 << (32 - (int)$bits);
+                if ((ip2long($ip) & $mask) === (ip2long($net) & $mask)) {
+                    throw new \InvalidArgumentException(
+                        'The URL points to a private or reserved network address and cannot be downloaded.'
+                    );
+                }
+            }
+            return;
+        }
+
+        // IPv6: validate any embedded IPv4 address as well
+        $embedded = null;
+        if (str_starts_with($binary, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff")) {
+            $embedded = substr($binary, 12, 4); // ::ffff:a.b.c.d (IPv4-mapped)
+        } elseif (str_starts_with($binary, "\x00\x64\xff\x9b")) {
+            $embedded = substr($binary, 12, 4); // 64:ff9b::/96 (NAT64)
+        } elseif (str_starts_with($binary, "\x20\x02")) {
+            $embedded = substr($binary, 2, 4);  // 2002::/16 (6to4)
+        }
+        if ($embedded !== null) {
+            $this->assertPublicIp(inet_ntop($embedded));
+        }
     }
 
     /**
@@ -385,7 +437,8 @@ class UploadFileTool extends AbstractRecordTool
         }
 
         $mimeType = strtolower(trim(explode(';', $contentType)[0]));
-        $extension = self::MIME_TO_EXTENSION[$mimeType] ?? null;
+        $extension = GeneralUtility::makeInstance(MimeTypeDetector::class)
+            ->getFileExtensionsForMimeType($mimeType)[0] ?? null;
         if ($extension === null) {
             throw new \InvalidArgumentException(
                 'Could not derive a file name from the URL (content type "' . $contentType . '"). Pass an explicit "fileName".'
@@ -408,7 +461,8 @@ class UploadFileTool extends AbstractRecordTool
         }
         if ($deduplicated) {
             $data['deduplicated'] = true;
-            $data['note'] = 'An identical file already exists in this storage; it is returned instead of creating a duplicate.';
+            $data['note'] = 'A file with identical content already exists in this storage at "' . $file->getCombinedIdentifier()
+                . '" (possibly in a different folder than requested); it is returned instead of creating a duplicate.';
         } else {
             if ($requestedFileName !== '' && $file->getName() !== $requestedFileName) {
                 $data['renamedFrom'] = $requestedFileName;

@@ -7,7 +7,11 @@ namespace Hn\McpServer\Tests\Functional\MCP\Tool;
 use GuzzleHttp\Promise\FulfilledPromise;
 use GuzzleHttp\Psr7\Response;
 use Hn\McpServer\MCP\Tool\File\UploadFileTool;
+use Hn\McpServer\Service\SiteInformationService;
 use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
+use TYPO3\CMS\Core\Http\NormalizedParams;
+use TYPO3\CMS\Core\Http\ServerRequest;
+use TYPO3\CMS\Core\Http\Uri;
 use TYPO3\CMS\Core\Cache\CacheManager;
 use TYPO3\CMS\Core\Core\Environment;
 use TYPO3\CMS\Core\Database\ConnectionPool;
@@ -160,21 +164,47 @@ class UploadFileToolTest extends FunctionalTestCase
     {
         $data = $this->executeUpload(['targetFolder' => '/user_upload/']);
 
-        $this->assertArrayHasKey('uploadUrl', $data);
-        $this->assertStringStartsWith(
-            'https://example.com/mcp_upload?token=',
+        $this->assertEquals(
+            'https://example.com/mcp_upload',
             $data['uploadUrl'],
-            'The upload URL must be absolute, resolved from the site base'
+            'The upload URL must be absolute, resolved from the site base, and must not carry the token'
         );
+        $this->assertNotEmpty($data['uploadToken']);
         $this->assertEquals('1:/user_upload/', $data['targetFolder']);
         $this->assertArrayHasKey('validUntil', $data);
         $this->assertStringContainsString('curl', $data['instructions']);
+        $this->assertStringContainsString('Authorization: Bearer', $data['instructions']);
 
         // A hashed single-use token was persisted
         $count = GeneralUtility::makeInstance(ConnectionPool::class)
             ->getConnectionForTable('tx_mcpserver_upload_tokens')
             ->count('uid', 'tx_mcpserver_upload_tokens', ['used' => 0]);
         $this->assertEquals(1, $count);
+    }
+
+    public function testPresignedUploadUrlIncludesSubdirectoryPrefix(): void
+    {
+        // TYPO3 installed at https://example.com/subdir/: the middleware routes
+        // /subdir/mcp_upload, so the generated URL must carry the prefix.
+        $serverParams = [
+            'HTTP_HOST' => 'example.com',
+            'HTTPS' => 'on',
+            'SCRIPT_NAME' => '/subdir/index.php',
+            'SCRIPT_FILENAME' => Environment::getPublicPath() . '/index.php',
+            'REQUEST_URI' => '/subdir/mcp',
+        ];
+        $request = new ServerRequest(new Uri('https://example.com/subdir/mcp'), 'POST', null, [], $serverParams);
+        $request = $request->withAttribute('normalizedParams', NormalizedParams::createFromRequest($request));
+
+        $siteInformation = GeneralUtility::makeInstance(SiteInformationService::class);
+        $siteInformation->setCurrentRequest($request);
+        try {
+            $data = $this->executeUpload(['targetFolder' => '/user_upload/']);
+        } finally {
+            $siteInformation->setCurrentRequest(null);
+        }
+
+        $this->assertEquals('https://example.com/subdir/mcp_upload', $data['uploadUrl']);
     }
 
     public function testSchemaOffersDefaultTargetFolder(): void
@@ -300,6 +330,29 @@ class UploadFileToolTest extends FunctionalTestCase
 
         // File name is derived from the redirect target
         $this->assertEquals('final.png', $data['fileName']);
+    }
+
+    public function testRedirectToPrivateAddressIsRejected(): void
+    {
+        // Every redirect hop must pass the SSRF validation, not just the first URL.
+        $this->mockHttpResponses([
+            'http://203.0.113.10/innocent' => new Response(302, ['Location' => 'http://127.0.0.1/internal.png']),
+        ]);
+
+        $this->assertUploadError(
+            ['url' => 'http://203.0.113.10/innocent', 'targetFolder' => '/user_upload/'],
+            'private or reserved'
+        );
+    }
+
+    public function testCgnatAddressIsRejected(): void
+    {
+        // 100.64.0.0/10 (CGNAT) passes PHP's filter flags but is cloud-internal
+        // (e.g. Alibaba metadata endpoint) and must be blocked explicitly.
+        $this->assertUploadError(
+            ['url' => 'http://100.100.100.200/latest/meta-data', 'targetFolder' => '/user_upload/'],
+            'private or reserved'
+        );
     }
 
     public function testUrlUploadDerivesExtensionFromContentType(): void

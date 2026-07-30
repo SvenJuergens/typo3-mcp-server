@@ -64,7 +64,13 @@ class FileUploadService implements SingletonInterface
             $storage = $storageRepository->getStorageObject((int)$matches[1]);
             $path = $matches[2];
         } else {
+            // Prefer the storage flagged is_default; installations without that
+            // flag but a single storage are common, so fall back to that one.
             $storage = $storageRepository->getDefaultStorage();
+            if ($storage === null) {
+                $allStorages = $storageRepository->findAll();
+                $storage = count($allStorages) === 1 ? reset($allStorages) : null;
+            }
             $path = $targetFolder;
         }
 
@@ -125,8 +131,12 @@ class FileUploadService implements SingletonInterface
     public function applyUserPermissionsToStorage(ResourceStorage $storage): void
     {
         $user = $GLOBALS['BE_USER'] ?? null;
-        if (!$user instanceof BackendUserAuthentication
-            || $user->isAdmin()
+        if (!$user instanceof BackendUserAuthentication) {
+            // Fail closed: uploads without an authenticated backend user must
+            // never end up on an unrestricted storage.
+            throw new \RuntimeException('No authenticated backend user in the upload context.', 1753887000);
+        }
+        if ($user->isAdmin()
             || $storage->isFallbackStorage()
             || $storage->getEvaluatePermissions()
         ) {
@@ -336,10 +346,10 @@ class FileUploadService implements SingletonInterface
             ->getConnectionForTable('tx_mcpserver_upload_tokens');
 
         // Lazy garbage collection: drop tokens that expired more than a day ago
-        $connection->executeStatement(
-            'DELETE FROM tx_mcpserver_upload_tokens WHERE expires < ?',
-            [time() - 86400]
-        );
+        $gcQuery = $connection->createQueryBuilder();
+        $gcQuery->delete('tx_mcpserver_upload_tokens')
+            ->where($gcQuery->expr()->lt('expires', $gcQuery->createNamedParameter(time() - 86400, \Doctrine\DBAL\ParameterType::INTEGER)))
+            ->executeStatement();
 
         $connection->insert('tx_mcpserver_upload_tokens', [
                 'token' => hash('sha256', $token),

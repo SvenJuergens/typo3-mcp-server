@@ -8,8 +8,10 @@ use Hn\McpServer\Http\FileUploadEndpoint;
 use Hn\McpServer\MCP\Tool\File\UploadFileTool;
 use Hn\McpServer\Service\FileUploadService;
 use TYPO3\CMS\Core\Core\Environment;
+use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Http\ServerRequest;
 use TYPO3\CMS\Core\Http\Stream;
+use TYPO3\CMS\Core\Http\UploadedFile;
 use TYPO3\CMS\Core\Http\Uri;
 use TYPO3\CMS\Core\Resource\ResourceFactory;
 use TYPO3\CMS\Core\Resource\StorageRepository;
@@ -159,6 +161,48 @@ class FileUploadEndpointTest extends FunctionalTestCase
         $this->assertEquals(400, $response->getStatusCode());
     }
 
+    public function testTokenFileNameBeatsQueryParameter(): void
+    {
+        // The token authorizes exactly the file it was minted for; the request
+        // must not be able to widen it to another name/type.
+        $token = $this->createToken('bound-name.png');
+        $response = $this->dispatchUpload($token, $this->pngBytes(), ['fileName' => 'sneaky-other.png']);
+
+        $this->assertEquals(201, $response->getStatusCode(), (string)$response->getBody());
+        $data = json_decode((string)$response->getBody(), true);
+        $this->assertEquals('bound-name.png', $data['fileName']);
+    }
+
+    public function testExpiredTokenIsRejected(): void
+    {
+        $token = $this->createToken();
+        GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('tx_mcpserver_upload_tokens')
+            ->update('tx_mcpserver_upload_tokens', ['expires' => time() - 10], []);
+
+        $response = $this->dispatchUpload($token, $this->pngBytes(), ['fileName' => 'late.png']);
+        $this->assertEquals(401, $response->getStatusCode());
+    }
+
+    public function testMultipartUploadIsAccepted(): void
+    {
+        $token = $this->createToken();
+
+        $stream = new Stream('php://temp', 'rw');
+        $stream->write($this->pngBytes());
+        $stream->rewind();
+        $uploadedFile = new UploadedFile($stream, strlen($this->pngBytes()), UPLOAD_ERR_OK, 'from-form.png');
+
+        $request = (new ServerRequest(new Uri('https://example.com/mcp_upload'), 'POST'))
+            ->withQueryParams(['token' => $token])
+            ->withUploadedFiles(['file' => $uploadedFile]);
+
+        $response = (new FileUploadEndpoint())($request);
+        $this->assertEquals(201, $response->getStatusCode(), (string)$response->getBody());
+        $data = json_decode((string)$response->getBody(), true);
+        $this->assertEquals('from-form.png', $data['fileName'], 'The multipart client file name should be used');
+    }
+
     public function testFailedUploadConsumesTheToken(): void
     {
         // The token is consumed on the attempt, not on success: a leaked token
@@ -190,10 +234,13 @@ class FileUploadEndpointTest extends FunctionalTestCase
         $this->assertFalse($result->isError, json_encode($result->jsonSerialize()));
         $toolData = json_decode($result->content[0]->text, true);
 
-        parse_str((string)parse_url($toolData['uploadUrl'], PHP_URL_QUERY), $query);
-        $this->assertNotEmpty($query['token']);
+        $this->assertNotEmpty($toolData['uploadToken']);
+        $this->assertStringNotContainsString('token=', $toolData['uploadUrl'], 'The token must not appear in the URL');
 
-        $response = $this->dispatchUpload($query['token'], $this->pngBytes());
+        // Token travels as Authorization header, like the tool instructions say
+        $response = $this->dispatchUpload('', $this->pngBytes(), [], 'PUT', [
+            'Authorization' => 'Bearer ' . $toolData['uploadToken'],
+        ]);
         $this->assertEquals(201, $response->getStatusCode(), (string)$response->getBody());
 
         $data = json_decode((string)$response->getBody(), true);

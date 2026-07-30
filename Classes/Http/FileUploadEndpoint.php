@@ -11,9 +11,13 @@ use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Message\StreamInterface;
 use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
 use TYPO3\CMS\Core\Configuration\Tca\TcaFactory;
+use TYPO3\CMS\Core\Context\Context;
+use TYPO3\CMS\Core\Context\UserAspect;
+use TYPO3\CMS\Core\Context\WorkspaceAspect;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Http\JsonResponse;
 use TYPO3\CMS\Core\Localization\LanguageServiceFactory;
+use TYPO3\CMS\Core\Log\LogManager;
 use TYPO3\CMS\Core\Resource\Exception\InsufficientFolderAccessPermissionsException;
 use TYPO3\CMS\Core\Resource\Exception\InsufficientFolderWritePermissionsException;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
@@ -42,7 +46,13 @@ class FileUploadEndpoint
             }
 
             $uploadService = GeneralUtility::makeInstance(FileUploadService::class);
-            $token = (string)($request->getQueryParams()['token'] ?? '');
+            // Preferred: Authorization header (query strings end up in server
+            // logs); the ?token= query parameter is kept as fallback.
+            $token = '';
+            if (preg_match('/^Bearer\s+(\S+)$/i', $request->getHeaderLine('Authorization'), $matches)) {
+                $token = $matches[1];
+            }
+            $token = $token !== '' ? $token : (string)($request->getQueryParams()['token'] ?? '');
             $tokenRow = $uploadService->consumeUploadToken($token);
             if ($tokenRow === null) {
                 return $this->jsonError('Invalid, expired, or already used upload token.', 401, $request);
@@ -53,8 +63,10 @@ class FileUploadEndpoint
 
             [$body, $uploadedFileName] = $this->extractUpload($request);
 
-            $fileName = trim((string)($request->getQueryParams()['fileName'] ?? ''))
-                ?: (string)$tokenRow['file_name']
+            // A file name fixed in the token wins: the token authorizes exactly
+            // that upload, the request must not widen it to another file type.
+            $fileName = (string)$tokenRow['file_name']
+                ?: trim((string)($request->getQueryParams()['fileName'] ?? ''))
                 ?: ($uploadedFileName ?? '')
                 ?: ($uploadService->extractFileNameFromContentDisposition($request->getHeaderLine('Content-Disposition')) ?? '');
             if ($fileName === '') {
@@ -88,7 +100,10 @@ class FileUploadEndpoint
         } catch (\InvalidArgumentException $e) {
             return $this->jsonError($e->getMessage(), 400, $request);
         } catch (\Throwable $e) {
-            return $this->jsonError('Upload failed: ' . $e->getMessage(), 500, $request);
+            // Log the details, but do not leak exception messages (paths etc.)
+            GeneralUtility::makeInstance(LogManager::class)->getLogger(__CLASS__)
+                ->error('Pre-signed upload failed: ' . $e->getMessage(), ['exception' => $e]);
+            return $this->jsonError('Upload failed due to an unexpected server error (see TYPO3 log).', 500, $request);
         }
     }
 
@@ -163,7 +178,12 @@ class FileUploadEndpoint
             ->select(['*'], 'be_users', ['uid' => $userId, 'deleted' => 0])
             ->fetchAssociative();
 
-        if (!$userData || !empty($userData['disable'])) {
+        $now = time();
+        if (!$userData
+            || !empty($userData['disable'])
+            || ((int)($userData['starttime'] ?? 0) > 0 && (int)$userData['starttime'] > $now)
+            || ((int)($userData['endtime'] ?? 0) > 0 && (int)$userData['endtime'] < $now)
+        ) {
             throw new \InvalidArgumentException('The backend user this upload token belongs to is not available.');
         }
 
@@ -175,6 +195,12 @@ class FileUploadEndpoint
 
         $GLOBALS['LANG'] = GeneralUtility::makeInstance(LanguageServiceFactory::class)
             ->createFromUserPreferences($beUser);
+
+        // Keep the Context API in sync with $GLOBALS['BE_USER'] (same as
+        // McpEndpoint): event listeners on the FAL add events may rely on it.
+        $context = GeneralUtility::makeInstance(Context::class);
+        $context->setAspect('backend.user', new UserAspect($beUser));
+        $context->setAspect('workspace', new WorkspaceAspect($beUser->workspace));
 
         // Ensure TCA is loaded (the middleware runs before the usual TCA bootstrap)
         if (empty($GLOBALS['TCA'])) {
