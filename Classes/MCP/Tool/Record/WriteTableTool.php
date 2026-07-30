@@ -951,8 +951,12 @@ class WriteTableTool extends AbstractRecordTool
         // translation behind that would make a corrected retry fail with
         // "Translation already exists".
         if (!empty($fieldValues)) {
-            $probe = $fieldValues;
-            $validationResult = $this->validateRecordData($table, $probe, 'update', $uid);
+            // Validate $fieldValues itself, not a throwaway copy: the method
+            // normalizes by reference (ISO dates to timestamps, arrays to CSV),
+            // and those normalized values are what gets persisted and reported
+            // in the event below. The normalizations are guarded by type checks,
+            // so updateRecord() re-validating them is a no-op.
+            $validationResult = $this->validateRecordData($table, $fieldValues, 'update', $uid);
             if ($validationResult !== true) {
                 return $this->createErrorResult('Validation error: ' . $validationResult);
             }

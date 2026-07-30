@@ -274,7 +274,14 @@ class UploadFileTool extends AbstractRecordTool
             $proxyConfigured = !empty($GLOBALS['TYPO3_CONF_VARS']['HTTP']['proxy']);
             if (!$proxyConfigured && $resolvedIp !== null && !filter_var($host, FILTER_VALIDATE_IP) && defined('CURLOPT_RESOLVE')) {
                 $port = $parts['port'] ?? (($parts['scheme'] ?? 'https') === 'https' ? 443 : 80);
-                $options['curl'] = [\CURLOPT_RESOLVE => [$host . ':' . $port . ':' . $resolvedIp]];
+                // CURLOPT_RESOLVE wants IPv6 addresses in brackets; a bare one
+                // makes the entry malformed, and curl then silently ignores the
+                // pin - which would drop the rebinding protection for
+                // IPv6-only hosts.
+                $pinnedIp = filter_var($resolvedIp, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false
+                    ? '[' . $resolvedIp . ']'
+                    : $resolvedIp;
+                $options['curl'] = [\CURLOPT_RESOLVE => [$host . ':' . $port . ':' . $pinnedIp]];
             }
 
             try {
