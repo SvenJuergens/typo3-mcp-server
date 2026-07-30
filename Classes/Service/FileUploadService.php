@@ -191,6 +191,20 @@ class FileUploadService implements SingletonInterface
             );
         }
 
+        // Uploads can be rewritten while being stored (e.g. the core SVG
+        // sanitizer), so the pre-upload hash above misses duplicates of such
+        // files. Re-check with the hash of the stored content and drop the
+        // fresh copy when it turns out to be one.
+        $existingFile = $this->findIdenticalFile($folder->getStorage(), $file->getSha1(), $file->getUid());
+        if ($existingFile !== null) {
+            try {
+                $folder->getStorage()->deleteFile($file);
+                return ['file' => $existingFile, 'deduplicated' => true];
+            } catch (\Exception) {
+                // The user may create but not delete files; keep the copy then.
+            }
+        }
+
         return ['file' => $file, 'deduplicated' => false];
     }
 
@@ -232,7 +246,7 @@ class FileUploadService implements SingletonInterface
      * mounts, otherwise the dedupe would leak (and hand out) files they cannot
      * access.
      */
-    protected function findIdenticalFile(ResourceStorage $storage, string $sha1): ?File
+    protected function findIdenticalFile(ResourceStorage $storage, string $sha1, int $excludeFileUid = 0): ?File
     {
         $rows = GeneralUtility::makeInstance(FileIndexRepository::class)->findByContentHash($sha1);
         $tableAccessService = GeneralUtility::makeInstance(TableAccessService::class);
@@ -244,6 +258,9 @@ class FileUploadService implements SingletonInterface
                 continue;
             }
             $uid = (int)$row['uid'];
+            if ($uid === $excludeFileUid) {
+                continue;
+            }
             if (!$isAdmin && !$tableAccessService->canAccessFileUid($uid)) {
                 continue;
             }

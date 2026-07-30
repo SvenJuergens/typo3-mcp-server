@@ -354,6 +354,39 @@ class UploadFileToolTest extends FunctionalTestCase
         $this->assertEquals('dQw4w9WgXcQ', trim($file->getContents()));
     }
 
+    public function testContentRewrittenDuringUploadIsStillDeduplicated(): void
+    {
+        // The core SVG sanitizer rewrites SVG content while it is stored, so the
+        // hash of the upload differs from the hash of the stored file. The dedupe
+        // must catch this via the post-store hash check.
+        $svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>';
+
+        $first = $this->executeUpload([
+            'content' => $svg,
+            'fileName' => 'shape.svg',
+            'targetFolder' => '/user_upload/',
+        ]);
+        $second = $this->executeUpload([
+            'content' => $svg,
+            'fileName' => 'shape.svg',
+            'targetFolder' => '/user_upload/',
+        ]);
+
+        $storedSha1 = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('sys_file')
+            ->select(['sha1'], 'sys_file', ['uid' => $first['uid']])
+            ->fetchOne();
+        $this->assertNotEquals(sha1($svg), $storedSha1, 'Precondition: the sanitizer must actually rewrite the SVG for this test to be meaningful');
+
+        $this->assertEquals($first['uid'], $second['uid'], 'Identical (sanitizer-rewritten) content should return the existing file');
+        $this->assertTrue($second['deduplicated'] ?? false);
+
+        $count = GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('sys_file')
+            ->count('uid', 'sys_file', ['storage' => 1]);
+        $this->assertEquals(1, $count, 'No duplicate sys_file record should have been created');
+    }
+
     public function testYoutubeUrlIsDeduplicated(): void
     {
         $this->mockHttpResponses([]);
