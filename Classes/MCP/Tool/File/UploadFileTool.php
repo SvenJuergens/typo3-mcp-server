@@ -116,8 +116,16 @@ class UploadFileTool extends AbstractRecordTool
             return $this->createErrorResult('Provide only one of "url" or "content" (or neither for a pre-signed upload URL).');
         }
 
+        // Check the requested name before touching the storage: resolving the
+        // target folder creates missing directories, and a rejected upload
+        // should not leave an empty folder behind.
+        if ($requestedFileName !== '') {
+            $uploadService->assertFileNameIsAllowed($requestedFileName);
+        }
+
+        $targetFolderPath = trim((string)($params['targetFolder'] ?? ''));
         try {
-            $folder = $uploadService->resolveTargetFolder(trim((string)($params['targetFolder'] ?? '')));
+            $folder = $uploadService->resolveTargetFolder($targetFolderPath);
         } catch (InsufficientFolderAccessPermissionsException | InsufficientFolderWritePermissionsException $e) {
             return $this->createErrorResult('No permission for the target folder: ' . $e->getMessage());
         }
@@ -134,7 +142,13 @@ class UploadFileTool extends AbstractRecordTool
             if ($onlineMediaResult !== null) {
                 return $onlineMediaResult;
             }
-            [$tempPath, $fileName] = $this->downloadFile($url, $requestedFileName, $uploadService->getMaxFileBytes());
+            try {
+                [$tempPath, $fileName] = $this->downloadFile($url, $requestedFileName, $uploadService->getMaxFileBytes());
+            } catch (\Throwable $e) {
+                // A failed download must not leave a freshly created folder behind
+                $uploadService->removeFolderIfCreatedAndEmpty($folder);
+                throw $e;
+            }
         } else {
             if ($requestedFileName === '') {
                 return $this->createErrorResult('"fileName" is required when uploading "content".');

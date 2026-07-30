@@ -216,6 +216,44 @@ class FileUploadEndpointTest extends FunctionalTestCase
         $this->assertEquals(401, $retry->getStatusCode(), 'A token must not survive a failed upload attempt');
     }
 
+    /**
+     * Same hazard as #107 on the /mcp endpoint: the upload endpoint impersonates
+     * a backend user without the regular authentication flow, so it has to
+     * restore the stored uc itself. Otherwise a writeUC() during the upload
+     * overwrites the user's backend preferences with a nearly empty array.
+     */
+    public function testStoredUserConfigurationSurvivesAnUpload(): void
+    {
+        $storedUc = ['titleLen' => 77, 'lang' => 'de', 'emailMeAtLogin' => 1];
+        $connection = GeneralUtility::makeInstance(ConnectionPool::class)->getConnectionForTable('be_users');
+        $connection->update('be_users', ['uc' => serialize($storedUc)], ['uid' => 1]);
+
+        $token = $this->createToken('with-uc.png');
+        $response = $this->dispatchUpload($token, $this->pngBytes());
+        $this->assertEquals(201, $response->getStatusCode(), (string)$response->getBody());
+
+        $this->assertEquals(77, $GLOBALS['BE_USER']->uc['titleLen'] ?? null, 'The impersonated user must carry the stored uc');
+
+        // Persisting now must not wipe what was stored
+        $GLOBALS['BE_USER']->writeUC();
+        $persisted = unserialize((string)$connection->select(['uc'], 'be_users', ['uid' => 1])->fetchOne(), ['allowed_classes' => false]);
+        $this->assertEquals(77, $persisted['titleLen'] ?? null, 'writeUC() must not destroy the stored backend preferences');
+        $this->assertEquals('de', $persisted['lang'] ?? null);
+    }
+
+    public function testDisabledBackendUserCannotUpload(): void
+    {
+        GeneralUtility::makeInstance(ConnectionPool::class)
+            ->getConnectionForTable('be_users')
+            ->update('be_users', ['disable' => 1], ['uid' => 1]);
+
+        $token = $this->createToken('blocked.png');
+        $response = $this->dispatchUpload($token, $this->pngBytes());
+
+        $this->assertEquals(400, $response->getStatusCode(), (string)$response->getBody());
+        $this->assertStringContainsString('not available', json_decode((string)$response->getBody(), true)['error']);
+    }
+
     public function testExecutableFileIsRejectedAtTheEndpointToo(): void
     {
         // The pre-signed endpoint is a second door into the same storage; the

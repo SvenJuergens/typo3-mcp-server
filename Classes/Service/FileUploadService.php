@@ -63,6 +63,14 @@ class FileUploadService implements SingletonInterface
     protected const DENIED_FILE_NAMES = ['.user.ini', '.htaccess', '.htpasswd', 'web.config'];
 
     /**
+     * Combined identifiers of folders created by resolveTargetFolder() in this
+     * request, so a failed upload can clean up after itself.
+     *
+     * @var string[]
+     */
+    protected array $createdFolderIdentifiers = [];
+
+    /**
      * Resolve the target folder, creating missing folders along the way.
      * Accepts "" (default upload folder), "/path/in/default/storage" and
      * combined identifiers like "2:/path".
@@ -117,11 +125,37 @@ class FileUploadService implements SingletonInterface
         if (!empty($segments)) {
             try {
                 $folder = $storage->createFolder(implode('/', $segments), $folder);
+                $this->createdFolderIdentifiers[] = $folder->getCombinedIdentifier();
             } catch (ExistingTargetFolderException) {
                 $folder = $storage->getFolder($existingIdentifier . implode('/', $segments) . '/');
             }
         }
         return $folder;
+    }
+
+    /**
+     * Undo a folder this request created, when the upload it was created for
+     * failed and left it empty. Silently does nothing for pre-existing folders,
+     * non-empty ones, or when the user may not delete folders.
+     */
+    public function removeFolderIfCreatedAndEmpty(Folder $folder): void
+    {
+        if (!in_array($folder->getCombinedIdentifier(), $this->createdFolderIdentifiers, true)) {
+            return;
+        }
+        try {
+            if ($folder->getFileCount() > 0 || count($folder->getSubfolders()) > 0) {
+                return;
+            }
+            $folder->getStorage()->deleteFolder($folder);
+            $this->createdFolderIdentifiers = array_values(array_diff(
+                $this->createdFolderIdentifiers,
+                [$folder->getCombinedIdentifier()]
+            ));
+        } catch (\Exception) {
+            // Leaving an empty folder behind is preferable to failing the
+            // request with a secondary error.
+        }
     }
 
     /**
@@ -253,7 +287,7 @@ class FileUploadService implements SingletonInterface
      * TYPO3's configurable fileDenyPattern and of the mime-consistency check,
      * so the guarantee holds no matter how an installation is configured.
      */
-    protected function assertFileNameIsAllowed(string $fileName): void
+    public function assertFileNameIsAllowed(string $fileName): void
     {
         $lowerName = strtolower($fileName);
         if (in_array($lowerName, self::DENIED_FILE_NAMES, true)) {

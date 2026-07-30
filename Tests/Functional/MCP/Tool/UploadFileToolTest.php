@@ -252,6 +252,30 @@ class UploadFileToolTest extends FunctionalTestCase
         );
     }
 
+    public function testRejectedFileNameDoesNotCreateTheTargetFolder(): void
+    {
+        // The name is checked before the storage is touched, so a rejected
+        // upload leaves no empty folder behind.
+        $this->assertUploadError(
+            ['content' => '<?php echo 1;', 'fileName' => 'evil.php', 'targetFolder' => '/user_upload/brand-new/'],
+            'not allowed'
+        );
+
+        $this->assertDirectoryDoesNotExist(Environment::getPublicPath() . '/fileadmin/user_upload/brand-new');
+    }
+
+    public function testFailedDownloadDoesNotLeaveAnEmptyFolderBehind(): void
+    {
+        $this->mockHttpResponses([]); // everything 404s
+
+        $this->assertUploadError(
+            ['url' => 'http://203.0.113.10/missing.jpg', 'targetFolder' => '/user_upload/download-fail/'],
+            '404'
+        );
+
+        $this->assertDirectoryDoesNotExist(Environment::getPublicPath() . '/fileadmin/user_upload/download-fail');
+    }
+
     public static function executableFileNameProvider(): array
     {
         $php = '<?php echo 1;';

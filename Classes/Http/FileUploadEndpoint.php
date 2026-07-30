@@ -4,19 +4,13 @@ declare(strict_types=1);
 
 namespace Hn\McpServer\Http;
 
+use Hn\McpServer\Service\BackendUserContextService;
 use Hn\McpServer\Service\FileUploadService;
 use Hn\McpServer\Service\SiteInformationService;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Message\StreamInterface;
-use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
-use TYPO3\CMS\Core\Configuration\Tca\TcaFactory;
-use TYPO3\CMS\Core\Context\Context;
-use TYPO3\CMS\Core\Context\UserAspect;
-use TYPO3\CMS\Core\Context\WorkspaceAspect;
-use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Http\JsonResponse;
-use TYPO3\CMS\Core\Localization\LanguageServiceFactory;
 use TYPO3\CMS\Core\Log\LogManager;
 use TYPO3\CMS\Core\Resource\Exception\InsufficientFolderAccessPermissionsException;
 use TYPO3\CMS\Core\Resource\Exception\InsufficientFolderWritePermissionsException;
@@ -76,6 +70,10 @@ class FileUploadEndpoint
                     $request
                 );
             }
+
+            // Before buffering or touching the storage: a rejected name should
+            // cost neither disk space nor a freshly created folder.
+            $uploadService->assertFileNameIsAllowed($fileName);
 
             $tempPath = $this->bufferToTempFile($body, $uploadService->getMaxFileBytes());
             try {
@@ -170,43 +168,15 @@ class FileUploadEndpoint
     }
 
     /**
-     * Set up the TYPO3 backend user context for the token's user
-     * (same pattern as McpEndpoint's token authentication).
+     * Set up the TYPO3 backend user context for the token's user.
      */
     protected function setupBackendUserContext(int $userId): void
     {
-        $userData = GeneralUtility::makeInstance(ConnectionPool::class)
-            ->getConnectionForTable('be_users')
-            ->select(['*'], 'be_users', ['uid' => $userId, 'deleted' => 0])
-            ->fetchAssociative();
-
-        $now = time();
-        if (!$userData
-            || !empty($userData['disable'])
-            || ((int)($userData['starttime'] ?? 0) > 0 && (int)$userData['starttime'] > $now)
-            || ((int)($userData['endtime'] ?? 0) > 0 && (int)$userData['endtime'] < $now)
-        ) {
+        try {
+            GeneralUtility::makeInstance(BackendUserContextService::class)->impersonate($userId);
+        } catch (\InvalidArgumentException) {
+            // Do not reveal whether the user exists, is disabled, or expired
             throw new \InvalidArgumentException('The backend user this upload token belongs to is not available.');
-        }
-
-        $beUser = GeneralUtility::makeInstance(BackendUserAuthentication::class);
-        $beUser->user = $userData;
-        $GLOBALS['BE_USER'] = $beUser;
-        $beUser->initializeUserSessionManager();
-        $beUser->fetchGroupData();
-
-        $GLOBALS['LANG'] = GeneralUtility::makeInstance(LanguageServiceFactory::class)
-            ->createFromUserPreferences($beUser);
-
-        // Keep the Context API in sync with $GLOBALS['BE_USER'] (same as
-        // McpEndpoint): event listeners on the FAL add events may rely on it.
-        $context = GeneralUtility::makeInstance(Context::class);
-        $context->setAspect('backend.user', new UserAspect($beUser));
-        $context->setAspect('workspace', new WorkspaceAspect($beUser->workspace));
-
-        // Ensure TCA is loaded (the middleware runs before the usual TCA bootstrap)
-        if (empty($GLOBALS['TCA'])) {
-            $GLOBALS['TCA'] = GeneralUtility::getContainer()->get(TcaFactory::class)->get();
         }
     }
 }
