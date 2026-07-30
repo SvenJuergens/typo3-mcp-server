@@ -90,6 +90,8 @@ class FileUploadEndpoint
             $data = $uploadService->describeFile($stored['file']);
             if ($stored['deduplicated']) {
                 $data['deduplicated'] = true;
+                $data['note'] = 'A file with identical content already existed in this storage (see identifier, '
+                    . 'possibly in a different folder than requested); it is returned instead of creating a duplicate.';
             } elseif ($stored['file']->getName() !== basename($fileName)) {
                 $data['renamedFrom'] = basename($fileName);
             }
