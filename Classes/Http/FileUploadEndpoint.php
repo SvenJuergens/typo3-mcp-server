@@ -35,7 +35,7 @@ class FileUploadEndpoint
     {
         try {
             if ($request->getMethod() === 'OPTIONS') {
-                return $this->addCorsHeaders(new JsonResponse([], 204), $request);
+                return $this->handlePreflightRequest($request);
             }
             if (!in_array($request->getMethod(), ['PUT', 'POST'], true)) {
                 return $this->jsonError('Use HTTP PUT (or POST) with the raw file bytes as request body.', 405, $request);
@@ -43,7 +43,7 @@ class FileUploadEndpoint
 
             $uploadService = GeneralUtility::makeInstance(FileUploadService::class);
             $token = (string)($request->getQueryParams()['token'] ?? '');
-            $tokenRow = $uploadService->validateUploadToken($token);
+            $tokenRow = $uploadService->consumeUploadToken($token);
             if ($tokenRow === null) {
                 return $this->jsonError('Invalid, expired, or already used upload token.', 401, $request);
             }
@@ -74,8 +74,6 @@ class FileUploadEndpoint
                     @unlink($tempPath);
                 }
             }
-
-            $uploadService->markUploadTokenUsed((int)$tokenRow['uid']);
 
             $data = $uploadService->describeFile($stored['file']);
             if ($stored['deduplicated']) {

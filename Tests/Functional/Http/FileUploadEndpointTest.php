@@ -45,6 +45,12 @@ class FileUploadEndpointTest extends FunctionalTestCase
         GeneralUtility::makeInstance(StorageRepository::class)
             ->createLocalStorage('fileadmin', 'fileadmin/', 'relative', '', true);
 
+        // A site with a fully qualified base URL: without one (and without an
+        // HTTP request context) pre-signed upload URLs cannot be built.
+        $siteDir = $this->instancePath . '/typo3conf/sites/test-site';
+        GeneralUtility::mkdir_deep($siteDir);
+        GeneralUtility::writeFile($siteDir . '/config.yaml', "rootPageId: 1\nbase: 'https://example.com/'\n", true);
+
         $this->setUpBackendUser(1);
     }
 
@@ -151,6 +157,19 @@ class FileUploadEndpointTest extends FunctionalTestCase
         $token = $this->createToken();
         $response = $this->dispatchUpload($token, '', ['fileName' => 'empty.png']);
         $this->assertEquals(400, $response->getStatusCode());
+    }
+
+    public function testFailedUploadConsumesTheToken(): void
+    {
+        // The token is consumed on the attempt, not on success: a leaked token
+        // must be a single attempt, not a 15-minute upload permit with retries.
+        $token = $this->createToken();
+
+        $failed = $this->dispatchUpload($token, '', ['fileName' => 'empty.png']);
+        $this->assertEquals(400, $failed->getStatusCode());
+
+        $retry = $this->dispatchUpload($token, $this->pngBytes(), ['fileName' => 'retry.png']);
+        $this->assertEquals(401, $retry->getStatusCode(), 'A token must not survive a failed upload attempt');
     }
 
     public function testGetMethodIsRejected(): void

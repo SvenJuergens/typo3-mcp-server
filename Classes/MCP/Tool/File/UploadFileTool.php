@@ -142,6 +142,7 @@ class UploadFileTool extends AbstractRecordTool
             }
             $tempPath = GeneralUtility::tempnam('mcp_upload_');
             if (@file_put_contents($tempPath, $content) === false) {
+                @unlink($tempPath);
                 return $this->createErrorResult('Failed to buffer the uploaded content on the server.');
             }
             $fileName = $requestedFileName;
@@ -166,9 +167,21 @@ class UploadFileTool extends AbstractRecordTool
      */
     protected function createPresignedUploadResult(FileUploadService $uploadService, Folder $folder, string $fileName): CallToolResult
     {
-        $tokenData = $uploadService->createUploadToken($folder, $fileName);
+        // Resolve the endpoint URL before minting a token: a relative upload
+        // URL is unusable for the client, so fail hard instead (typically
+        // stdio mode without a fully qualified site base).
         $siteInformation = GeneralUtility::makeInstance(SiteInformationService::class);
-        $uploadUrl = $siteInformation->makeAbsoluteUrl('/mcp_upload?token=' . $tokenData['token']);
+        $endpointUrl = (string)$siteInformation->makeAbsoluteUrl('/mcp_upload');
+        if (!str_starts_with($endpointUrl, 'http://') && !str_starts_with($endpointUrl, 'https://')) {
+            return $this->createErrorResult(
+                'Cannot build an absolute upload URL because no public base URL of this TYPO3 instance is known '
+                . '(no HTTP request context and no site with a fully qualified base URL). '
+                . 'Configure a site base URL including scheme and domain, or upload via "url" or "content" instead.'
+            );
+        }
+
+        $tokenData = $uploadService->createUploadToken($folder, $fileName);
+        $uploadUrl = $endpointUrl . '?token=' . $tokenData['token'];
 
         $curlFileName = $fileName !== '' ? $fileName : 'photo.jpg';
         $curlUrl = $uploadUrl . ($fileName === '' ? '&fileName=' . $curlFileName : '');
@@ -293,11 +306,20 @@ class UploadFileTool extends AbstractRecordTool
             throw new \InvalidArgumentException('The URL returned an empty response body.');
         }
 
-        $fileName = $requestedFileName !== '' ? $requestedFileName : $this->deriveFileName(
-            $finalUrl,
-            $response->getHeaderLine('Content-Disposition'),
-            $response->getHeaderLine('Content-Type')
-        );
+        if ($requestedFileName !== '') {
+            return [$tempPath, $requestedFileName];
+        }
+
+        try {
+            $fileName = $this->deriveFileName(
+                $finalUrl,
+                $response->getHeaderLine('Content-Disposition'),
+                $response->getHeaderLine('Content-Type')
+            );
+        } catch (\Throwable $e) {
+            @unlink($tempPath);
+            throw $e;
+        }
 
         return [$tempPath, $fileName];
     }

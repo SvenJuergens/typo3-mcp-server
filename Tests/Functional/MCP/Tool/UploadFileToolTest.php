@@ -47,6 +47,12 @@ class UploadFileToolTest extends FunctionalTestCase
         GeneralUtility::makeInstance(StorageRepository::class)
             ->createLocalStorage('fileadmin', 'fileadmin/', 'relative', '', true);
 
+        // A site with a fully qualified base URL: without one (and without an
+        // HTTP request context) pre-signed upload URLs cannot be built.
+        $siteDir = $this->instancePath . '/typo3conf/sites/test-site';
+        GeneralUtility::mkdir_deep($siteDir);
+        GeneralUtility::writeFile($siteDir . '/config.yaml', "rootPageId: 1\nbase: 'https://example.com/'\n", true);
+
         $this->setUpBackendUser(1);
     }
 
@@ -155,7 +161,11 @@ class UploadFileToolTest extends FunctionalTestCase
         $data = $this->executeUpload(['targetFolder' => '/user_upload/']);
 
         $this->assertArrayHasKey('uploadUrl', $data);
-        $this->assertStringContainsString('/mcp_upload?token=', $data['uploadUrl']);
+        $this->assertStringStartsWith(
+            'https://example.com/mcp_upload?token=',
+            $data['uploadUrl'],
+            'The upload URL must be absolute, resolved from the site base'
+        );
         $this->assertEquals('1:/user_upload/', $data['targetFolder']);
         $this->assertArrayHasKey('validUntil', $data);
         $this->assertStringContainsString('curl', $data['instructions']);
@@ -190,6 +200,20 @@ class UploadFileToolTest extends FunctionalTestCase
         $this->assertUploadError(
             ['content' => 'hello', 'fileName' => 'noextension', 'targetFolder' => '/user_upload/'],
             'extension'
+        );
+    }
+
+    public function testBrowserExecutableFilesAreRejected(): void
+    {
+        // Served from fileadmin these would run script code in the site's origin
+        // (stored XSS); the core fileDenyPattern only covers server-side execution.
+        $this->assertUploadError(
+            ['content' => '<script>alert(1)</script>', 'fileName' => 'page.html', 'targetFolder' => '/user_upload/'],
+            'not allowed'
+        );
+        $this->assertUploadError(
+            ['content' => 'alert(1)', 'fileName' => 'app.js', 'targetFolder' => '/user_upload/'],
+            'not allowed'
         );
     }
 

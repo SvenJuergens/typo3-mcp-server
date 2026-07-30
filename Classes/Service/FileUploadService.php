@@ -36,6 +36,11 @@ class FileUploadService implements SingletonInterface
     protected const UPLOAD_TOKEN_LIFETIME = 900; // 15 minutes
 
     /**
+     * Browser-executable formats; see the check in storeFile().
+     */
+    protected const DENIED_EXTENSIONS = ['htm', 'html', 'xhtml', 'shtml', 'js', 'mjs', 'svgz', 'swf', 'hta'];
+
+    /**
      * Resolve the target folder, creating missing folders along the way.
      * Accepts "" (default upload folder), "/path/in/default/storage" and
      * combined identifiers like "2:/path".
@@ -165,6 +170,17 @@ class FileUploadService implements SingletonInterface
         if ($fileName === '' || !str_contains($fileName, '.')) {
             throw new \InvalidArgumentException(
                 'Could not determine a file name with an extension. Pass an explicit "fileName" like "image.jpg".'
+            );
+        }
+
+        // TYPO3's fileDenyPattern only blocks server-side execution (.php,
+        // .htaccess, ...). Files served from fileadmin share the origin of the
+        // backend, so browser-executable formats are rejected here as well.
+        $extension = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+        if (in_array($extension, self::DENIED_EXTENSIONS, true)) {
+            throw new \InvalidArgumentException(
+                'Files with the extension ".' . $extension . '" are not allowed because they could run '
+                . 'script code in the browser when served from the file storage.'
             );
         }
 
@@ -340,10 +356,15 @@ class FileUploadService implements SingletonInterface
     }
 
     /**
-     * Validate a plain upload token; returns the token row or null when the
-     * token is unknown, expired, or already used.
+     * Validate and atomically consume a plain upload token. Returns the token
+     * row exactly once: parallel or repeated requests with the same token get
+     * null, as do unknown, expired, or already used tokens.
+     *
+     * The token is consumed BEFORE the upload runs, so a failed upload burns
+     * it too - a leaked token is a single attempt, not a 15-minute upload
+     * permit. Clients simply request a fresh URL to retry.
      */
-    public function validateUploadToken(string $token): ?array
+    public function consumeUploadToken(string $token): ?array
     {
         if ($token === '') {
             return null;
@@ -359,16 +380,11 @@ class FileUploadService implements SingletonInterface
         if (!$row || (int)$row['used'] !== 0 || (int)$row['expires'] < time()) {
             return null;
         }
-        return $row;
-    }
 
-    /**
-     * Mark an upload token as consumed (single use).
-     */
-    public function markUploadTokenUsed(int $tokenUid): void
-    {
-        GeneralUtility::makeInstance(ConnectionPool::class)
-            ->getConnectionForTable('tx_mcpserver_upload_tokens')
-            ->update('tx_mcpserver_upload_tokens', ['used' => time(), 'tstamp' => time()], ['uid' => $tokenUid]);
+        $affected = $connection->executeStatement(
+            'UPDATE tx_mcpserver_upload_tokens SET used = ?, tstamp = ? WHERE uid = ? AND used = 0',
+            [time(), time(), (int)$row['uid']]
+        );
+        return $affected === 1 ? $row : null;
     }
 }

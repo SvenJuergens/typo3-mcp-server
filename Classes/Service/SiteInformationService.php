@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hn\McpServer\Service;
 
+use Hn\McpServer\Http\RequestUrlTrait;
 use Psr\Http\Message\ServerRequestInterface;
 use TYPO3\CMS\Core\Exception\SiteNotFoundException;
 use TYPO3\CMS\Core\Site\Entity\Site;
@@ -15,6 +16,8 @@ use TYPO3\CMS\Core\Utility\GeneralUtility;
  */
 class SiteInformationService
 {
+    use RequestUrlTrait;
+
     protected SiteFinder $siteFinder;
     protected ?ServerRequestInterface $currentRequest = null;
 
@@ -69,11 +72,12 @@ class SiteInformationService
     protected function resolveRequestOrSiteBase(): ?string
     {
         if ($this->currentRequest !== null) {
-            $uri = $this->currentRequest->getUri();
-            $host = $uri->getHost() ?: $this->currentRequest->getHeaderLine('Host');
-            $scheme = $uri->getScheme() ?: 'https';
-            if (!empty($host)) {
-                return $scheme . '://' . $host;
+            // Same resolution as the HTTP endpoints: NormalizedParams-based,
+            // which keeps non-standard ports, reverse proxy configuration and
+            // subdirectory installations intact.
+            $base = $this->getRequestBaseUrl($this->currentRequest);
+            if (parse_url($base, PHP_URL_HOST) !== null) {
+                return $base;
             }
         }
 
@@ -82,7 +86,8 @@ class SiteInformationService
                 $siteBase = $site->getBase();
                 if ($siteBase->getHost() !== '') {
                     $scheme = $siteBase->getScheme() ?: 'https';
-                    return $scheme . '://' . $siteBase->getHost();
+                    $port = $siteBase->getPort();
+                    return $scheme . '://' . $siteBase->getHost() . ($port ? ':' . $port : '');
                 }
             }
         } catch (\Throwable) {
