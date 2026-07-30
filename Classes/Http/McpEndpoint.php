@@ -30,6 +30,7 @@ use Hn\McpServer\Http\CorsHeadersTrait;
 class McpEndpoint
 {
     use CorsHeadersTrait;
+    use RequestUrlTrait;
     /**
      * eID entry point via __invoke method
      */
@@ -142,11 +143,13 @@ class McpEndpoint
             $stream->write($output);
             $stream->rewind();
 
-            return new Response(
+            $response = new Response(
                 $stream,
                 $statusCode,
                 ['Content-Type' => $contentType]
             );
+
+            return $this->addCorsHeaders($response, $request);
 
         } catch (\Throwable $e) {
             $stream = new Stream('php://temp', 'rw');
@@ -156,11 +159,13 @@ class McpEndpoint
             ]));
             $stream->rewind();
 
-            return new Response(
+            $response = new Response(
                 $stream,
                 500,
                 ['Content-Type' => 'application/json']
             );
+
+            return $this->addCorsHeaders($response, $request);
         }
     }
 
@@ -208,12 +213,7 @@ class McpEndpoint
         // Build WWW-Authenticate header with resource_metadata URL (RFC 9728)
         $wwwAuth = 'Bearer';
         if ($request !== null) {
-            $uri = $request->getUri();
-            $baseUrl = $uri->getScheme() . '://' . $uri->getHost();
-            if ($uri->getPort() && $uri->getPort() !== 443 && $uri->getPort() !== 80) {
-                $baseUrl .= ':' . $uri->getPort();
-            }
-            $resourceMetadataUrl = $baseUrl . '/.well-known/oauth-protected-resource/mcp';
+            $resourceMetadataUrl = $this->getRequestBaseUrl($request) . '/.well-known/oauth-protected-resource/mcp';
             $wwwAuth = 'Bearer resource_metadata="' . $resourceMetadataUrl . '"';
         }
 
