@@ -317,7 +317,7 @@ While the MCP Server is powerful, some features are still in development:
 
 ### Image/File Handling
 - Files are create-only: `UploadFile` adds new files (from URL, YouTube/Vimeo URL, or text content), but existing files can never be overwritten or deleted through MCP. Physical files are not workspace-versioned in TYPO3, so any destructive file operation would be immediately live and irreversible — name conflicts are auto-renamed and identical content is deduplicated instead.
-- Local files on the MCP client's machine are uploaded out-of-band: calling `UploadFile` without `url`/`content` returns a pre-signed, single-use upload URL (`/mcp_upload?token=...`, 15 minute TTL, bound to the user and target folder). The client PUTs the raw bytes there — binary data never travels through the model's context — and receives the created `sys_file` as JSON.
+- Local files on the MCP client's machine are uploaded out-of-band: calling `UploadFile` without `url`/`content` returns the upload endpoint (`/mcp_upload`) plus a single-use token (15 minute TTL, bound to the user and target folder) to be sent as `Authorization: Bearer` header. The client PUTs the raw bytes there — binary data never travels through the model's context — and receives the created `sys_file` as JSON. The token is consumed by the attempt, so a failed upload requires a fresh one.
 - The maximum accepted file size (URL downloads and pre-signed uploads) is configurable via the extension setting `maxFileSizeMb` (default 500).
 - File metadata (`sys_file_metadata`) remains editable through WriteTable (workspace-staged).
 - No visual/semantic image search yet — finding images relies on file names and metadata.
