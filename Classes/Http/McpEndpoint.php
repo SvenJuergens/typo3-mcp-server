@@ -250,6 +250,20 @@ class McpEndpoint
 
         if ($userData) {
             $beUser->user = $userData;
+
+            // CRITICAL: Restore the user's stored configuration (uc). The regular
+            // authentication flow unserializes it via unpack_uc(), which token auth
+            // bypasses. Without this, $beUser->uc stays empty and any writeUC()
+            // triggered during request processing (e.g. the update signals fired
+            // when the MCP workspace is created below) overwrites the user's
+            // stored backend preferences with a nearly empty array. That in turn
+            // breaks the backend Setup module, which expects keys like 'titleLen'
+            // to exist ("Undefined array key" warning in SetupModuleController).
+            $storedUc = unserialize((string)($userData['uc'] ?? ''), ['allowed_classes' => false]);
+            if (is_array($storedUc)) {
+                $beUser->uc = $storedUc;
+            }
+
             $GLOBALS['BE_USER'] = $beUser;
 
             // CRITICAL: Initialize an (anonymous) user session.
@@ -264,6 +278,15 @@ class McpEndpoint
             // This computes tables_select, tables_modify, non_exclude_fields, webmounts, etc.
             // Without this, non-admin users have no permissions computed from their groups
             $beUser->fetchGroupData();
+
+            // Apply the uc defaults and TSconfig overrides, exactly like
+            // initializeBackendLogin() does after fetchGroupData() on a regular
+            // login. This covers users who never logged into the backend: their
+            // stored uc is empty, and without the defaults the first writeUC()
+            // would persist a nearly empty uc - which core never repairs, since
+            // backendSetUC() only fills in the defaults while uc is completely
+            // empty.
+            $beUser->backendSetUC();
 
             // Initialize language service (required for DataHandler and other core components)
             $this->initializeLanguageService($beUser);
