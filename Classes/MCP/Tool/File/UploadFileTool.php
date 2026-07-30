@@ -317,6 +317,18 @@ class UploadFileTool extends AbstractRecordTool
             throw new \InvalidArgumentException('The URL returned an empty response body.');
         }
 
+        // A web page is not a file. Without this, the download would be rejected
+        // further down with a message about file extensions or mismatching
+        // content, which sends the caller hunting for the wrong problem.
+        if ($this->looksLikeHtmlDocument($tempPath)) {
+            @unlink($tempPath);
+            throw new \InvalidArgumentException(
+                'The URL returned a web page (HTML), not a file. Pass a direct link to the file itself '
+                . '(e.g. the image address from the page, usually ending in .jpg/.png/.pdf). '
+                . 'YouTube and Vimeo page URLs are the exception - those are recognized and embedded as videos.'
+            );
+        }
+
         if ($requestedFileName !== '') {
             return [$tempPath, $requestedFileName];
         }
@@ -333,6 +345,33 @@ class UploadFileTool extends AbstractRecordTool
         }
 
         return [$tempPath, $fileName];
+    }
+
+    /**
+     * Sniff the downloaded bytes for an HTML document. Deliberately content-based
+     * rather than header-based: servers mislabel real files as text/html often
+     * enough that a Content-Type check alone would reject valid downloads.
+     */
+    protected function looksLikeHtmlDocument(string $tempPath): bool
+    {
+        $handle = @fopen($tempPath, 'rb');
+        if ($handle === false) {
+            return false;
+        }
+        $head = (string)fread($handle, 1024);
+        fclose($handle);
+
+        // Skip a UTF-8 BOM and leading whitespace, then look for the markers a
+        // browser would use to decide it is dealing with a document.
+        $head = strtolower(ltrim(preg_replace('/^\xEF\xBB\xBF/', '', $head) ?? ''));
+        foreach (['<!doctype html', '<html', '<head', '<body'] as $marker) {
+            if (str_starts_with($head, $marker)) {
+                return true;
+            }
+        }
+
+        // Documents that open with a comment or an XML declaration
+        return (bool)preg_match('/^(<\?xml[^>]*\?>|<!--.{0,200}?-->)\s*(<!doctype html|<html)/s', $head);
     }
 
     /**

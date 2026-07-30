@@ -345,6 +345,59 @@ class UploadFileToolTest extends FunctionalTestCase
         );
     }
 
+    public function testWebPageUrlIsRejectedWithAnActionableMessage(): void
+    {
+        // Pasting a normal website URL is a common mistake; the message must
+        // point at the URL, not at file extensions or content mismatches.
+        $this->mockHttpResponses([
+            'http://203.0.113.10/some-article' => new Response(
+                200,
+                ['Content-Type' => 'text/html; charset=utf-8'],
+                "<!DOCTYPE html>\n<html><head><title>An article</title></head><body><p>Text</p></body></html>"
+            ),
+        ]);
+
+        $this->assertUploadError(
+            ['url' => 'http://203.0.113.10/some-article', 'targetFolder' => '/user_upload/'],
+            'web page'
+        );
+    }
+
+    public function testWebPageCannotBeSmuggledInUnderAnImageFileName(): void
+    {
+        $this->mockHttpResponses([
+            'http://203.0.113.10/page' => new Response(
+                200,
+                ['Content-Type' => 'text/html'],
+                '<html><body>not an image</body></html>'
+            ),
+        ]);
+
+        $this->assertUploadError(
+            ['url' => 'http://203.0.113.10/page', 'fileName' => 'looks-like.jpg', 'targetFolder' => '/user_upload/'],
+            'web page'
+        );
+    }
+
+    public function testMislabeledImageIsStillAccepted(): void
+    {
+        // Servers that declare a real image as text/html must keep working:
+        // the HTML detection looks at the content, not at the header.
+        $this->mockHttpResponses([
+            'http://203.0.113.10/photo.png' => new Response(200, ['Content-Type' => 'text/html'], $this->pngBytes()),
+        ]);
+
+        $data = $this->executeUpload([
+            'url' => 'http://203.0.113.10/photo.png',
+            'targetFolder' => '/user_upload/',
+        ]);
+
+        // The exact name may carry a _01 suffix: the test instance's fileadmin
+        // survives between tests of this class while the database is reset.
+        $this->assertStringEndsWith('.png', $data['fileName']);
+        $this->assertEquals('image/png', $data['mimeType']);
+    }
+
     public function testCgnatAddressIsRejected(): void
     {
         // 100.64.0.0/10 (CGNAT) passes PHP's filter flags but is cloud-internal
