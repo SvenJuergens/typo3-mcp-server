@@ -211,6 +211,20 @@ class McpEndpoint
             return $this->addCorsHeaders($response, $request);
 
         } catch (\Throwable $e) {
+            // Deliberately not behind the debug switch: this catch-all is the only
+            // place where an exception from the MCP layer becomes visible at all,
+            // and handing it to the client alone means it is gone the moment the
+            // client discards the 500.
+            error_log(sprintf(
+                'MCP: Unhandled %s at %s:%d - %s%s%s',
+                get_class($e),
+                $e->getFile(),
+                $e->getLine(),
+                $e->getMessage(),
+                PHP_EOL,
+                $e->getTraceAsString()
+            ));
+
             $stream = new Stream('php://temp', 'rw');
             $stream->write(json_encode([
                 'error' => 'Internal Server Error',
