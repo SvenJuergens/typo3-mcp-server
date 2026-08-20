@@ -51,6 +51,31 @@ class McpEndpoint
     ];
 
     /**
+     * Whether the endpoint may write its diagnostic output to the log.
+     *
+     * The endpoint is polled by connector proxies in a retry loop, so logging
+     * every request unconditionally fills a production log with entries nobody
+     * asked for and nobody reads. Diagnostics are therefore limited to the
+     * Development context, which is also where they are actually needed.
+     */
+    private function isDebugLoggingEnabled(): bool
+    {
+        return Environment::getContext()->isDevelopment();
+    }
+
+    /**
+     * Write a diagnostic message, unless the context says otherwise.
+     */
+    private function logDebug(string $message): void
+    {
+        if (!$this->isDebugLoggingEnabled()) {
+            return;
+        }
+
+        error_log($message);
+    }
+
+    /**
      * Replace credential values with a marker while keeping the key itself, so the
      * log still shows which headers and parameters a client actually sent.
      *
@@ -77,16 +102,19 @@ class McpEndpoint
             $container = GeneralUtility::getContainer();
             $serverFactory = $container->get(McpServerFactory::class);
 
-            // Debug: Log all request details
-            $requestHeaders = [];
-            foreach ($request->getHeaders() as $name => $values) {
-                $requestHeaders[$name] = implode(', ', $values);
-            }
             $queryParams = $request->getQueryParams();
 
-            error_log("MCP: Request method: " . $request->getMethod());
-            error_log("MCP: Request headers: " . json_encode($this->redactCredentials($requestHeaders)));
-            error_log("MCP: Query params: " . json_encode($this->redactCredentials($queryParams)));
+            // Debug: Log all request details
+            if ($this->isDebugLoggingEnabled()) {
+                $requestHeaders = [];
+                foreach ($request->getHeaders() as $name => $values) {
+                    $requestHeaders[$name] = implode(', ', $values);
+                }
+
+                error_log("MCP: Request method: " . $request->getMethod());
+                error_log("MCP: Request headers: " . json_encode($this->redactCredentials($requestHeaders)));
+                error_log("MCP: Query params: " . json_encode($this->redactCredentials($queryParams)));
+            }
 
             // Check if this is an auth header test request
             if (isset($queryParams['test']) && $queryParams['test'] === 'auth') {
@@ -97,22 +125,22 @@ class McpEndpoint
             $token = $this->extractToken($request);
 
             if (!$token) {
-                error_log("MCP: No token found in Authorization header or query params");
+                $this->logDebug("MCP: No token found in Authorization header or query params");
                 return $this->createUnauthorizedResponse('Missing authentication token', $request);
             }
 
             // Log token for debugging (first 20 chars only for security)
-            error_log("MCP: Received token: " . substr($token, 0, 20) . "...");
+            $this->logDebug("MCP: Received token: " . substr($token, 0, 20) . "...");
 
             $oauthService = GeneralUtility::makeInstance(OAuthService::class);
             $tokenInfo = $oauthService->validateToken($token, $request);
 
             if (!$tokenInfo) {
-                error_log("MCP: Token validation failed for: " . substr($token, 0, 20) . "...");
+                $this->logDebug("MCP: Token validation failed for: " . substr($token, 0, 20) . "...");
                 return $this->createUnauthorizedResponse('Invalid or expired token', $request);
             }
 
-            error_log("MCP: Token validation successful for user: " . $tokenInfo['be_user_uid']);
+            $this->logDebug("MCP: Token validation successful for user: " . $tokenInfo['be_user_uid']);
 
             // Set up TYPO3 backend context for the authenticated user
             $this->setupBackendUserContext($tokenInfo['be_user_uid']);
@@ -332,7 +360,7 @@ class McpEndpoint
             $context->setAspect('workspace', new WorkspaceAspect($workspaceId));
 
             // Log workspace selection for debugging
-            error_log("MCP: User {$userId} switched to workspace {$workspaceId}");
+            $this->logDebug("MCP: User {$userId} switched to workspace {$workspaceId}");
         }
 
         // Ensure TCA is loaded using proper TYPO3 core method
