@@ -129,14 +129,14 @@ class McpEndpoint
                 return $this->createUnauthorizedResponse('Missing authentication token', $request);
             }
 
-            // Log token for debugging (first 20 chars only for security)
-            $this->logDebug("MCP: Received token: " . substr($token, 0, 20) . "...");
+            // Log authentication status without exposing token material
+            $this->logDebug('MCP: Received authentication token');
 
             $oauthService = GeneralUtility::makeInstance(OAuthService::class);
             $tokenInfo = $oauthService->validateToken($token, $request);
 
             if (!$tokenInfo) {
-                $this->logDebug("MCP: Token validation failed for: " . substr($token, 0, 20) . "...");
+                $this->logDebug('MCP: Authentication token validation failed');
                 return $this->createUnauthorizedResponse('Invalid or expired token', $request);
             }
 
