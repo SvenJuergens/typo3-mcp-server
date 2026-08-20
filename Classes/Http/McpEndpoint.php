@@ -31,6 +31,42 @@ class McpEndpoint
 {
     use CorsHeadersTrait;
     use RequestUrlTrait;
+
+    /**
+     * Header and query parameter names whose values must never reach a log file.
+     *
+     * Access tokens are handed out with a 30 day lifetime, so a single logged
+     * request is enough to leak a long lived credential to everyone who can read
+     * - or forward - the log.
+     */
+    private const CREDENTIAL_KEYS = [
+        'authorization',
+        'proxy-authorization',
+        'cookie',
+        'set-cookie',
+        'token',
+        'access_token',
+        'refresh_token',
+        'client_secret',
+    ];
+
+    /**
+     * Replace credential values with a marker while keeping the key itself, so the
+     * log still shows which headers and parameters a client actually sent.
+     *
+     * @param array<string, mixed> $values
+     * @return array<string, mixed>
+     */
+    private function redactCredentials(array $values): array
+    {
+        foreach ($values as $key => $value) {
+            if (in_array(strtolower((string)$key), self::CREDENTIAL_KEYS, true)) {
+                $values[$key] = '***redacted***';
+            }
+        }
+
+        return $values;
+    }
     /**
      * eID entry point via __invoke method
      */
@@ -42,15 +78,15 @@ class McpEndpoint
             $serverFactory = $container->get(McpServerFactory::class);
 
             // Debug: Log all request details
-            $headers = [];
+            $requestHeaders = [];
             foreach ($request->getHeaders() as $name => $values) {
-                $headers[$name] = implode(', ', $values);
+                $requestHeaders[$name] = implode(', ', $values);
             }
             $queryParams = $request->getQueryParams();
 
             error_log("MCP: Request method: " . $request->getMethod());
-            error_log("MCP: Request headers: " . json_encode($headers));
-            error_log("MCP: Query params: " . json_encode($queryParams));
+            error_log("MCP: Request headers: " . json_encode($this->redactCredentials($requestHeaders)));
+            error_log("MCP: Query params: " . json_encode($this->redactCredentials($queryParams)));
 
             // Check if this is an auth header test request
             if (isset($queryParams['test']) && $queryParams['test'] === 'auth') {
