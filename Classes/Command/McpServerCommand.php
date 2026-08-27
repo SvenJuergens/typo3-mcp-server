@@ -12,6 +12,7 @@ use TYPO3\CMS\Core\Authentication\BackendUserAuthentication;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Core\Configuration\Tca\TcaFactory;
+use Hn\McpServer\Service\BackendUserContextService;
 use Hn\McpServer\MCP\McpServerFactory;
 
 /**
@@ -81,7 +82,8 @@ class McpServerCommand extends Command
             $beUser->user['uid'] = 1; // Add a UID for the fake user to prevent DataHandler errors
             $beUser->user['workspace_id'] = 0; // Set workspace ID to live workspace
             $beUser->workspace = 0; // Set workspace to live workspace
-            $this->restoreStoredUserConfiguration($beUser);
+            GeneralUtility::makeInstance(BackendUserContextService::class)
+                ->restoreStoredUserConfiguration($beUser);
             $GLOBALS['BE_USER'] = $beUser;
         } elseif (!$beUser->isAdmin()) {
             // If user exists but is not admin, set admin flag directly
@@ -94,23 +96,4 @@ class McpServerCommand extends Command
         }
     }
 
-    /**
-     * Load the stored user configuration (uc) of the impersonated backend user.
-     * If $beUser->uc stayed empty, a writeUC() triggered during tool execution
-     * (e.g. by the update signals fired on workspace creation) would overwrite
-     * the real user's backend preferences in the be_users record.
-     */
-    protected function restoreStoredUserConfiguration(BackendUserAuthentication $beUser): void
-    {
-        $storedUc = GeneralUtility::makeInstance(ConnectionPool::class)
-            ->getConnectionForTable('be_users')
-            ->select(['uc'], 'be_users', ['uid' => (int)$beUser->user['uid']])
-            ->fetchOne();
-        if (is_string($storedUc)) {
-            $uc = unserialize($storedUc, ['allowed_classes' => false]);
-            if (is_array($uc)) {
-                $beUser->uc = $uc;
-            }
-        }
-    }
 }

@@ -144,7 +144,8 @@ $writeTool->execute([
 - `foreign_match_fields` (`tablenames`, `fieldname`) ensure references are scoped to the correct parent field
 - File references are enriched with metadata from `sys_file` (filename, identifier, mime type, public URL)
 - `sys_file` itself is read-only - files are managed through the filesystem, not direct DB edits
-- File uploads are NOT supported - only referencing existing files via `uid_local`
+- New files are created with the `UploadFile` tool (from a URL, a YouTube/Vimeo link, text content,
+  or a pre-signed upload); the resulting `sys_file` uid is then referenced via `uid_local`
 
 ### 3. Automatic Workspace Handling
 - Both ReadTableTool and WriteTableTool automatically initialize workspace context via `WorkspaceContextService`
@@ -199,8 +200,7 @@ $connection->update('child_table', ['parent_field' => $parentUid], ['uid' => $ch
 
 ## Future Improvements
 
-1. **File Uploads**: Allow uploading new files and creating sys_file records (currently only existing files can be referenced)
-2. **Batch Operations**: Support for bulk inline relation updates
-3. **Position Management**: Full support for positioning inline records (before/after specific records)
-4. **Validation Enhancement**: More comprehensive validation for embedded record data
-5. **Performance Optimization**: Batch foreign field updates instead of individual UPDATE queries
+1. **Batch Operations**: Support for bulk inline relation updates
+2. **Position Management**: Full support for positioning inline records (before/after specific records)
+3. **Validation Enhancement**: More comprehensive validation for embedded record data
+4. **Performance Optimization**: Batch foreign field updates instead of individual UPDATE queries
