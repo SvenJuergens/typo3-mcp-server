@@ -4,21 +4,23 @@ declare(strict_types=1);
 
 namespace Hn\McpServer\Http;
 
-use Mcp\Server\HttpServerRunner;
-use Mcp\Server\Transport\Http\StandardPhpAdapter;
-use Mcp\Server\Transport\Http\FileSessionStore;
-use TYPO3\CMS\Core\Core\Environment;
-use TYPO3\CMS\Core\Utility\GeneralUtility;
-use TYPO3\CMS\Core\Http\Response;
-use TYPO3\CMS\Core\Http\Stream;
-use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Message\ServerRequestInterface;
 use Hn\McpServer\MCP\McpServerFactory;
 use Hn\McpServer\Service\BackendUserContextService;
-use Hn\McpServer\Service\WorkspaceContextService;
 use Hn\McpServer\Service\OAuthService;
 use Hn\McpServer\Service\SiteInformationService;
-use Hn\McpServer\Http\CorsHeadersTrait;
+use Hn\McpServer\Service\WorkspaceContextService;
+use Mcp\Server\HttpServerRunner;
+use Mcp\Server\Transport\Http\FileSessionStore;
+use Mcp\Server\Transport\Http\HttpMessage;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\ServerRequestInterface;
+use TYPO3\CMS\Core\Context\Context;
+use TYPO3\CMS\Core\Context\UserAspect;
+use TYPO3\CMS\Core\Context\WorkspaceAspect;
+use TYPO3\CMS\Core\Core\Environment;
+use TYPO3\CMS\Core\Http\Response;
+use TYPO3\CMS\Core\Http\Stream;
+use TYPO3\CMS\Core\Utility\GeneralUtility;
 
 /**
  * MCP HTTP Endpoint for remote access
@@ -27,6 +29,68 @@ class McpEndpoint
 {
     use CorsHeadersTrait;
     use RequestUrlTrait;
+
+    /**
+     * Header and query parameter names whose values must never reach a log file.
+     *
+     * Access tokens are handed out with a 30 day lifetime, so a single logged
+     * request is enough to leak a long lived credential to everyone who can read
+     * - or forward - the log.
+     */
+    private const CREDENTIAL_KEYS = [
+        'authorization',
+        'proxy-authorization',
+        'cookie',
+        'set-cookie',
+        'token',
+        'access_token',
+        'refresh_token',
+        'client_secret',
+    ];
+
+    /**
+     * Whether the endpoint may write its diagnostic output to the log.
+     *
+     * The endpoint is polled by connector proxies in a retry loop, so logging
+     * every request unconditionally fills a production log with entries nobody
+     * asked for and nobody reads. Diagnostics are therefore limited to the
+     * Development context, which is also where they are actually needed.
+     */
+    private function isDebugLoggingEnabled(): bool
+    {
+        return Environment::getContext()->isDevelopment();
+    }
+
+    /**
+     * Write a diagnostic message, unless the context says otherwise.
+     */
+    private function logDebug(string $message): void
+    {
+        if (!$this->isDebugLoggingEnabled()) {
+            return;
+        }
+
+        error_log($message);
+    }
+
+    /**
+     * Replace credential values with a marker while keeping the key itself, so the
+     * log still shows which headers and parameters a client actually sent.
+     *
+     * @param array<string, mixed> $values
+     * @return array<string, mixed>
+     */
+    private function redactCredentials(array $values): array
+    {
+        foreach ($values as $key => $value) {
+            if (in_array(strtolower((string)$key), self::CREDENTIAL_KEYS, true)) {
+                $values[$key] = '***redacted***';
+            }
+        }
+
+        return $values;
+    }
+
     /**
      * eID entry point via __invoke method
      */
@@ -37,16 +101,19 @@ class McpEndpoint
             $container = GeneralUtility::getContainer();
             $serverFactory = $container->get(McpServerFactory::class);
 
-            // Debug: Log all request details
-            $headers = [];
-            foreach ($request->getHeaders() as $name => $values) {
-                $headers[$name] = implode(', ', $values);
-            }
             $queryParams = $request->getQueryParams();
 
-            error_log("MCP: Request method: " . $request->getMethod());
-            error_log("MCP: Request headers: " . json_encode($headers));
-            error_log("MCP: Query params: " . json_encode($queryParams));
+            // Debug: Log all request details
+            if ($this->isDebugLoggingEnabled()) {
+                $requestHeaders = [];
+                foreach ($request->getHeaders() as $name => $values) {
+                    $requestHeaders[$name] = implode(', ', $values);
+                }
+
+                error_log("MCP: Request method: " . $request->getMethod());
+                error_log("MCP: Request headers: " . json_encode($this->redactCredentials($requestHeaders)));
+                error_log("MCP: Query params: " . json_encode($this->redactCredentials($queryParams)));
+            }
 
             // Check if this is an auth header test request
             if (isset($queryParams['test']) && $queryParams['test'] === 'auth') {
@@ -57,22 +124,22 @@ class McpEndpoint
             $token = $this->extractToken($request);
 
             if (!$token) {
-                error_log("MCP: No token found in Authorization header or query params");
+                $this->logDebug("MCP: No token found in Authorization header or query params");
                 return $this->createUnauthorizedResponse('Missing authentication token', $request);
             }
 
-            // Log token for debugging (first 20 chars only for security)
-            error_log("MCP: Received token: " . substr($token, 0, 20) . "...");
+            // Log authentication status without exposing token material
+            $this->logDebug('MCP: Received authentication token');
 
             $oauthService = GeneralUtility::makeInstance(OAuthService::class);
             $tokenInfo = $oauthService->validateToken($token, $request);
 
             if (!$tokenInfo) {
-                error_log("MCP: Token validation failed for: " . substr($token, 0, 20) . "...");
+                $this->logDebug('MCP: Authentication token validation failed');
                 return $this->createUnauthorizedResponse('Invalid or expired token', $request);
             }
 
-            error_log("MCP: Token validation successful for user: " . $tokenInfo['be_user_uid']);
+            $this->logDebug("MCP: Token validation successful for user: " . $tokenInfo['be_user_uid']);
 
             // Set up TYPO3 backend context for the authenticated user
             $this->setupBackendUserContext($tokenInfo['be_user_uid']);
@@ -111,43 +178,52 @@ class McpEndpoint
                 $sessionStore
             );
 
-            // Handle the request and capture output
-            ob_start();
-
-            // Suppress warnings/notices from MCP SDK to prevent deprecation issues
-            $oldErrorReporting = error_reporting(E_ERROR | E_PARSE);
-
-            try {
-                $adapter = new StandardPhpAdapter($runner);
-                $adapter->handle();
-            } finally {
-                // Restore error reporting
-                error_reporting($oldErrorReporting);
+            // Convert the PSR-7 request into the SDK's HttpMessage and let the
+            // runner handle it directly. This keeps the whole request/response
+            // cycle inside PSR-7 (no superglobals, no output buffering), which
+            // also makes the endpoint testable in functional tests.
+            $mcpRequest = new HttpMessage((string)$request->getBody());
+            $mcpRequest->setMethod($request->getMethod());
+            $mcpRequest->setUri((string)$request->getUri());
+            $mcpRequest->setQueryParams($request->getQueryParams());
+            foreach ($request->getHeaders() as $name => $values) {
+                $mcpRequest->setHeader($name, implode(', ', $values));
             }
 
-            $output = ob_get_clean();
+            $mcpResponse = $runner->handleRequest($mcpRequest);
 
-            // Get the status code set by the adapter
-            $statusCode = http_response_code() ?: 200;
-
-            // Try to decode as JSON, fallback to plain text
-            $decodedOutput = json_decode($output, true);
-            $contentType = $decodedOutput !== null ? 'application/json' : 'text/plain';
-
-            // Create proper stream for response
             $stream = new Stream('php://temp', 'rw');
-            $stream->write($output);
+            $stream->write((string)($mcpResponse->getBody() ?? ''));
             $stream->rewind();
+
+            $headers = $mcpResponse->getHeaders();
+            if (!isset($headers['content-type'])) {
+                $headers['content-type'] = 'application/json';
+            }
 
             $response = new Response(
                 $stream,
-                $statusCode,
-                ['Content-Type' => $contentType]
+                $mcpResponse->getStatusCode(),
+                $headers
             );
 
             return $this->addCorsHeaders($response, $request);
 
         } catch (\Throwable $e) {
+            // Deliberately not behind the debug switch: this catch-all is the only
+            // place where an exception from the MCP layer becomes visible at all,
+            // and handing it to the client alone means it is gone the moment the
+            // client discards the 500.
+            error_log(sprintf(
+                'MCP: Unhandled %s at %s:%d - %s%s%s',
+                get_class($e),
+                $e->getFile(),
+                $e->getLine(),
+                $e->getMessage(),
+                PHP_EOL,
+                $e->getTraceAsString()
+            ));
+
             $stream = new Stream('php://temp', 'rw');
             $stream->write(json_encode([
                 'error' => 'Internal Server Error',
@@ -239,7 +315,13 @@ class McpEndpoint
         $workspaceId = $workspaceService->switchToOptimalWorkspace($beUser);
         $userContext->updateWorkspaceAspect($workspaceId);
 
-        error_log("MCP: User {$userId} switched to workspace {$workspaceId}");
+        // Set up TYPO3 Context API (following BackendUserAuthenticator pattern)
+        $context = GeneralUtility::makeInstance(Context::class);
+        $context->setAspect('backend.user', new UserAspect($beUser));
+        $context->setAspect('workspace', new WorkspaceAspect($workspaceId));
+
+        // Log workspace selection for debugging
+        $this->logDebug("MCP: User {$userId} switched to workspace {$workspaceId}");
     }
 
     /**
