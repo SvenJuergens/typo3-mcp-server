@@ -165,6 +165,38 @@ Here are practical examples of how the MCP Server enables AI-powered content man
 }}
 ```
 
+### "Put this image on the homepage"
+
+**User says**: "Put this image on our homepage: https://example.org/press/team.jpg"
+
+**What happens**:
+1. AI uses `UploadFile` with the URL - the TYPO3 server downloads the file into the user's upload folder
+2. The response carries the new `sys_file` uid, its public URL, and a hint on how to reference it
+3. AI uses `GetPage` to find the homepage and its content area
+4. AI uses `WriteTable` to create a content element that references the file via `uid_local`
+
+**Tool calls**:
+```json
+// 1. Upload the file (targetFolder defaults to the user's upload folder)
+{"tool": "UploadFile", "params": {"url": "https://example.org/press/team.jpg"}}
+// -> {"uid": 42, "fileName": "team.jpg", "identifier": "1:/user_upload/team.jpg", ...}
+
+// 2. Find the homepage
+{"tool": "GetPage", "params": {"url": "/"}}
+
+// 3. Create the content element referencing the file
+{"tool": "WriteTable", "params": {
+  "table": "tt_content",
+  "action": "create",
+  "pid": 1,
+  "data": {
+    "CType": "image",
+    "header": "Our team",
+    "image": [{"uid_local": 42, "alternative": "The team in front of the office"}]
+  }
+}}
+```
+
 ### "Create a news article from this Word draft"
 
 **User says**: "Create a news article from this document" [provides Word file]
