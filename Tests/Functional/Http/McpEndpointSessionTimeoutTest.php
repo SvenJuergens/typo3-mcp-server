@@ -64,7 +64,7 @@ class McpEndpointSessionTimeoutTest extends AbstractFunctionalTest
             ['Mcp-Session-Id' => $sessionId]
         );
 
-        $this->assertSame(200, $response->getStatusCode(), (string)$response->getBody());
+        $this->assertToolsListSucceeded($response);
     }
 
     public function testSessionExpiresAfterTheConfiguredTimeout(): void
@@ -100,7 +100,22 @@ class McpEndpointSessionTimeoutTest extends AbstractFunctionalTest
             ['Mcp-Session-Id' => $sessionId]
         );
 
-        $this->assertSame(200, $response->getStatusCode(), (string)$response->getBody());
+        $this->assertToolsListSucceeded($response);
+    }
+
+    /**
+     * A session that is still alive answers the call - and answers it
+     * properly: a JSON-RPC error would come back as 200 as well.
+     */
+    private function assertToolsListSucceeded(ResponseInterface $response): void
+    {
+        $raw = (string)$response->getBody();
+        $this->assertSame(200, $response->getStatusCode(), $raw);
+
+        $body = json_decode($raw, true);
+        $this->assertIsArray($body, $raw);
+        $this->assertArrayNotHasKey('error', $body, $raw);
+        $this->assertNotEmpty($body['result']['tools'] ?? [], $raw);
     }
 
     /**
